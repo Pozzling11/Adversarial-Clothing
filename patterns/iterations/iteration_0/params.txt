@@ -1,0 +1,18 @@
+iteration      : 0
+date           : 2026-02-24 (approx)
+patch_size     : 160
+steps          : 5000
+lr             : 0.03
+init           : uniform
+batch_size     : 1
+alpha_nps      : 0.01
+beta_tv        : 10.0
+eot            : True
+device         : cpu
+host_pool_size : 6
+loss_mode      : mean + max (max inclusive)
+final_loss     : 0.069316
+loss_reduction : 93.1%
+fn_rate        : 23.3% (7/30)
+conf_drop      : 16.4%
+notes          : beta=10 heavy TV smoothing; recovered from git commit e777afc
