@@ -82,6 +82,8 @@ def parse_args() -> argparse.Namespace:
                    help="L-inf budget per pixel in [0,1] (default 1.0 = unconstrained)")
     p.add_argument("--topk",       type=int, default=TOP_K,
                    help="Top-k anchors used in loss (default 50)")
+    p.add_argument("--batch-size", type=int, default=4,
+                   help="Images averaged per PGD step for smoother gradients (default 4)")
     p.add_argument("--no-eot",     action="store_true",
                    help="Disable EOT augmentation during training")
     p.add_argument("--alpha",      type=float, default=0.01,
@@ -209,7 +211,11 @@ def forward_person_loss(
     device: torch.device,
 ) -> torch.Tensor:
     """
-    Forward pass returning scalar loss = mean(top-k person confs) + max(top-k).
+    Forward pass returning scalar loss = mean(top-k person confs).
+
+    Mean-only loss spreads the gradient evenly across all high-confidence
+    anchors, driving consistent confidence suppression across every frame
+    rather than hunting for single lucky knockouts (FNs).
     Output layout: (1, 4+nc, 8400)  — channels-first (Ultralytics 8.x).
     """
     global _SHAPE_PRINTED
@@ -222,7 +228,7 @@ def forward_person_loss(
     person_scores = pred[0, PERSON_COL_IDX, :]          # (N_anchors,)
     k = min(top_k, person_scores.shape[0])
     top_scores = torch.topk(person_scores, k).values
-    return top_scores.mean() + top_scores.max()
+    return top_scores.mean()
 
 
 # ---------------------------------------------------------------------------
@@ -487,6 +493,8 @@ def main() -> None:
     print(f"[INFO] Steps      : {args.steps}  |  LR: {args.lr}  |  ε: {args.eps}")
     print(f"[INFO] EOT        : {'OFF' if args.no_eot else 'ON'}")
     print(f"[INFO] Init noise : {args.init}")
+    print(f"[INFO] Loss mode  : mean (confidence suppression)")
+    print(f"[INFO] Batch size : {args.batch_size} images/step")
     print(f"[INFO] NPS α      : {args.alpha}  |  TV β : {args.beta}")
 
     # ------------------------------------------------------------------
@@ -539,28 +547,35 @@ def main() -> None:
         if patch.grad is not None:
             patch.grad.zero_()
 
-        # (a) Sample a random background from the pool
-        host_t = random.choice(host_pool_t)
+        # (a–e) Mini-batch: average objectness loss over batch_size images
+        #       Each sample uses a different host + placement + EOT augmentation
+        #       so the gradient points toward suppression that works everywhere.
+        obj_losses = []
+        for _ in range(args.batch_size):
+            # (a) Sample a random background from the pool
+            host_t = random.choice(host_pool_t)
 
-        # (b) Random torso-band placement
-        row, col = random_torso_placement(IMG_SIZE, patch_size)
+            # (b) Random torso-band placement
+            row, col = random_torso_placement(IMG_SIZE, patch_size)
 
-        # (c) Composite patch onto host
-        composite = apply_patch_to_tensor(host_t, patch, row, col)
+            # (c) Composite patch onto host
+            composite = apply_patch_to_tensor(host_t, patch, row, col)
 
-        # (d) EOT: augment composite (stop-grad on augmentation transforms)
-        if not args.no_eot:
-            # Detach → augment → reattach via add-zero trick to preserve grad path
-            composite_aug = eot_augment_tensor(composite.detach())
-            # Re-embed the (still-grad-carrying) patch into the augmented composite
-            composite_aug = apply_patch_to_tensor(
-                composite_aug.detach(), patch, row, col
+            # (d) EOT: augment composite (stop-grad on augmentation transforms)
+            if not args.no_eot:
+                composite_aug = eot_augment_tensor(composite.detach())
+                composite_aug = apply_patch_to_tensor(
+                    composite_aug.detach(), patch, row, col
+                )
+            else:
+                composite_aug = composite
+
+            obj_losses.append(
+                forward_person_loss(torch_model, composite_aug, args.topk, device)
             )
-        else:
-            composite_aug = composite
 
-        # (e) Forward + loss  (L = L_obj + α·L_nps + β·L_tv)
-        loss = forward_person_loss(torch_model, composite_aug, args.topk, device)
+        # (e) Mean objectness loss + regularisation (NPS/TV added once, not per sample)
+        loss = sum(obj_losses) / len(obj_losses)
         if args.alpha > 0 and printable_colors is not None:
             loss = loss + args.alpha * nps_loss(patch, printable_colors)
         if args.beta > 0:
