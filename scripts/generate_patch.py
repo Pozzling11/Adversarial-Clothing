@@ -97,6 +97,10 @@ def parse_args() -> argparse.Namespace:
                             "salt_pepper", "gray", "blocky", "perlin"],
                    help="Patch initialisation pattern (default: uniform)")
     p.add_argument("--seed",       type=int, default=42)
+    p.add_argument("--resume",     action="store_true",
+                   help="Resume from checkpoint if one exists for this patch name")
+    p.add_argument("--checkpoint-every", type=int, default=100,
+                   help="Save a resume checkpoint every N steps (default 100)")
     p.add_argument("--verbose",    action="store_true",
                    help="Print loss every 50 steps")
     return p.parse_args()
@@ -486,7 +490,11 @@ def main() -> None:
     patch_size = args.patch_size
     out_path   = Path(args.out) if args.out else PROJECT_ROOT / "patterns" / f"patch_{patch_size}_{args.init}.png"
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device(
+        "cuda" if torch.cuda.is_available()
+        else "mps" if torch.backends.mps.is_available()
+        else "cpu"
+    )
     print(f"[INFO] Device     : {device}")
     print(f"[INFO] Weights    : {args.model}")
     print(f"[INFO] Patch size : {patch_size}×{patch_size}")
@@ -521,10 +529,23 @@ def main() -> None:
     host_pool_t   = [preprocess(h).to(device) for h in host_pool_bgr]
 
     # ------------------------------------------------------------------
-    # 4. Initialise patch
+    # 4. Initialise patch  (or resume from checkpoint)
     # ------------------------------------------------------------------
-    patch = init_patch(args.init, patch_size, device)
-    patch.requires_grad_(True)
+    ckpt_path  = out_path.parent / (out_path.stem + "_ckpt.pt")
+    start_step = 0
+    best_loss  = float("inf")
+
+    if args.resume and ckpt_path.exists():
+        ckpt = torch.load(ckpt_path, map_location=device)
+        patch      = ckpt["patch"].to(device).requires_grad_(True)
+        start_step = ckpt["step"]
+        best_loss  = ckpt["best_loss"]
+        best_patch = ckpt["best_patch"].to(device)
+        print(f"[INFO] Resumed from checkpoint  step={start_step}  best_loss={best_loss:.6f}")
+    else:
+        patch = init_patch(args.init, patch_size, device)
+        patch.requires_grad_(True)
+        best_patch = patch.detach().clone()
 
     # ------------------------------------------------------------------
     # 5. Baseline loss (random host, fixed centre placement)
@@ -537,13 +558,10 @@ def main() -> None:
         baseline_loss  = forward_person_loss(torch_model, base_composite, args.topk, device)
     print(f"[INFO] Baseline person-conf loss : {baseline_loss.item():.6f}")
 
-    best_loss  = float("inf")
-    best_patch = patch.detach().clone()
-
     # ------------------------------------------------------------------
     # 6. PGD loop with EOT augmentation + multi-host + random placement
     # ------------------------------------------------------------------
-    for step in range(1, args.steps + 1):
+    for step in range(start_step + 1, args.steps + 1):
         if patch.grad is not None:
             patch.grad.zero_()
 
@@ -597,6 +615,15 @@ def main() -> None:
             best_loss  = loss.item()
             best_patch = patch.detach().clone()
 
+        # Periodic checkpoint — allows resuming if interrupted
+        if step % args.checkpoint_every == 0:
+            torch.save({
+                "step":       step,
+                "patch":      patch.detach().cpu(),
+                "best_patch": best_patch.cpu(),
+                "best_loss":  best_loss,
+            }, ckpt_path)
+
         if args.verbose and step % 50 == 0:
             print(f"  Step {step:>5d}/{args.steps}  loss: {loss.item():.6f}  best: {best_loss:.6f}")
 
@@ -611,6 +638,11 @@ def main() -> None:
     patch_bgr = cv2.cvtColor((patch_np * 255).astype(np.uint8), cv2.COLOR_RGB2BGR)
     cv2.imwrite(str(out_path), patch_bgr)
     print(f"[INFO] Patch saved  → {out_path}")
+
+    # Clean up checkpoint now that training is complete
+    if ckpt_path.exists():
+        ckpt_path.unlink()
+        print(f"[INFO] Checkpoint removed (training complete)")
 
     preview = out_path.parent / (out_path.stem + "_preview.png")
     cv2.imwrite(str(preview), cv2.resize(patch_bgr, (512, 512), interpolation=cv2.INTER_NEAREST))
