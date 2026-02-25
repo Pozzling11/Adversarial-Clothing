@@ -1,0 +1,25 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+
+# Data (large files — keep structure, not content)
+data/clean/*
+data/adversarial/*
+!data/clean/.gitkeep
+!data/adversarial/.gitkeep
+
+# Results CSVs (reproducible)
+results/*.csv
+
+# macOS
+.DS_Store
+._*
+
+# Model weights (large binary)
+*.pt

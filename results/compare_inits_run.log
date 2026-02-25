@@ -1,0 +1,63 @@
+
+[INFO] Device: cpu  |  Patch: 384px  |  Steps: 1000  |  LR: 0.03  |  EOT: ON
+[INFO] Comparing 6 init modes: uniform, gaussian, checkerboard, stripes, salt_pepper, gray
+
+[INFO] Host pool  : 6 image(s) from /Volumes/Crucial X6/VS Code Adversarial Patterns/data/clean
+============================================================
+  Training — init: uniform
+============================================================
+[DEBUG] raw pred shape: (1, 84, 8400)
+  Loss: 0.616274 → 0.000048  (100.0% reduction)
+  Evaluating (5 EOT augs × 6 images) …
+  FN rate: 23.3%  (7/30)  |  conf drop: 37.9%  |  adv avg conf: 0.5607
+
+============================================================
+  Training — init: gaussian
+============================================================
+  Loss: 0.694835 → 0.000052  (100.0% reduction)
+  Evaluating (5 EOT augs × 6 images) …
+  FN rate: 13.3%  (4/30)  |  conf drop: 29.5%  |  adv avg conf: 0.6367
+
+============================================================
+  Training — init: checkerboard
+============================================================
+  Loss: 0.688062 → 0.000096  (100.0% reduction)
+  Evaluating (5 EOT augs × 6 images) …
+  FN rate: 13.3%  (4/30)  |  conf drop: 30.9%  |  adv avg conf: 0.6243
+
+============================================================
+  Training — init: stripes
+============================================================
+  Loss: 0.961902 → 0.000107  (100.0% reduction)
+  Evaluating (5 EOT augs × 6 images) …
+  FN rate: 13.3%  (4/30)  |  conf drop: 31.1%  |  adv avg conf: 0.6224
+
+============================================================
+  Training — init: salt_pepper
+============================================================
+  Loss: 0.801766 → 0.000088  (100.0% reduction)
+  Evaluating (5 EOT augs × 6 images) …
+  FN rate: 16.7%  (5/30)  |  conf drop: 35.4%  |  adv avg conf: 0.5832
+
+============================================================
+  Training — init: gray
+============================================================
+  Loss: 1.120434 → 0.000058  (100.0% reduction)
+  Evaluating (5 EOT augs × 6 images) …
+  FN rate: 13.3%  (4/30)  |  conf drop: 32.8%  |  adv avg conf: 0.6065
+
+
+==============================================================================
+  RANKED COMPARISON  (conf threshold: 0.25)
+==============================================================================
+  Init             FNs    FN%  ConfDrop%   AdvConf   LossRed
+  ------------------------------------------------------------------------
+  uniform            7/30    23.3%      37.9%    0.5607    100.0%  ← BEST
+  salt_pepper        5/30    16.7%      35.4%    0.5832    100.0%
+  gray               4/30    13.3%      32.8%    0.6065    100.0%
+  stripes            4/30    13.3%      31.1%    0.6224    100.0%
+  checkerboard       4/30    13.3%      30.9%    0.6243    100.0%
+  gaussian           4/30    13.3%      29.5%    0.6367    100.0%
+==============================================================================
+
+[INFO] Comparison CSV saved → /Volumes/Crucial X6/VS Code Adversarial Patterns/results/init_comparison_20260223_173958.csv

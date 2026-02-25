@@ -1,0 +1,130 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Run YOLOv8 Live Detection",
+			"type": "shell",
+			"command": "./.venv/bin/python",
+			"args": [
+				"main.py"
+			],
+			"isBackground": true,
+			"group": "build"
+		},
+		{
+			"label": "Train 160px uniform patch",
+			"type": "shell",
+			"command": "./.venv/bin/python",
+			"args": [
+				"-u",
+				"scripts/generate_patch.py",
+				"--patch-size",
+				"160",
+				"--steps",
+				"3000",
+				"--lr",
+				"0.03",
+				"--init",
+				"uniform",
+				"--verbose"
+			],
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "build"
+		},
+		{
+			"label": "Apply 160px uniform patch",
+			"type": "shell",
+			"command": "./.venv/bin/python",
+			"args": [
+				"scripts/apply_patch.py",
+				"--patch",
+				"patterns/patch_160_uniform.png",
+				"--placement",
+				"torso",
+				"--n-aug",
+				"5"
+			],
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "build"
+		},
+		{
+			"label": "Evaluate 160px uniform patch",
+			"type": "shell",
+			"command": "./.venv/bin/python",
+			"args": [
+				"scripts/evaluate.py",
+				"--adv-dir",
+				"data/adversarial/uniform",
+				"--conf",
+				"0.25"
+			],
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "build"
+		},
+		{
+			"label": "Syntax check generate_patch",
+			"type": "shell",
+			"command": "./.venv/bin/python",
+			"args": [
+				"-c",
+				"import py_compile; py_compile.compile('scripts/generate_patch.py', doraise=True); print('SYNTAX OK')"
+			],
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "build"
+		},
+		{
+			"label": "Train 160px NPS+TV patch",
+			"type": "shell",
+			"command": "./.venv/bin/python",
+			"args": [
+				"-u",
+				"scripts/generate_patch.py",
+				"--patch-size",
+				"160",
+				"--steps",
+				"3000",
+				"--lr",
+				"0.03",
+				"--init",
+				"uniform",
+				"--alpha",
+				"0.01",
+				"--beta",
+				"2.5",
+				"--verbose"
+			],
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "build"
+		},
+		{
+			"label": "Train NPS TV patch",
+			"type": "shell",
+			"command": "./.venv/bin/python",
+			"args": [
+				"-u",
+				"scripts/generate_patch.py",
+				"--patch-size",
+				"160",
+				"--steps",
+				"3000",
+				"--lr",
+				"0.03",
+				"--init",
+				"uniform",
+				"--alpha",
+				"0.01",
+				"--beta",
+				"2.5",
+				"--verbose"
+			],
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "build"
+		}
+	]
+}
