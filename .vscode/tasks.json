@@ -125,6 +125,60 @@
 			"isBackground": false,
 			"problemMatcher": [],
 			"group": "build"
+		},
+		{
+			"label": "Train Mean Inclusive Loss",
+			"type": "shell",
+			"command": "./.venv/bin/python",
+			"args": [
+				"-u",
+				"scripts/generate_patch.py",
+				"--patch-size",
+				"160",
+				"--steps",
+				"8000",
+				"--lr",
+				"0.03",
+				"--init",
+				"uniform",
+				"--alpha",
+				"0.01",
+				"--beta",
+				"2.5",
+				"--batch-size",
+				"4",
+				"--verbose"
+			],
+			"isBackground": false,
+			"group": "build"
+		},
+		{
+			"label": "Train MPS Mean Inclusive Loss",
+			"type": "shell",
+			"command": "./.venv/bin/python",
+			"args": [
+				"-u",
+				"scripts/generate_patch.py",
+				"--patch-size",
+				"160",
+				"--steps",
+				"8000",
+				"--lr",
+				"0.03",
+				"--init",
+				"uniform",
+				"--alpha",
+				"0.01",
+				"--beta",
+				"2.5",
+				"--batch-size",
+				"4",
+				"--checkpoint-every",
+				"100",
+				"--verbose"
+			],
+			"isBackground": false,
+			"group": "build"
 		}
 	]
 }
