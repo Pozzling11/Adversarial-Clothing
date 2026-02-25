@@ -633,20 +633,73 @@ def main() -> None:
     # ------------------------------------------------------------------
     # 7. Save patch + preview
     # ------------------------------------------------------------------
-    out_path.parent.mkdir(parents=True, exist_ok=True)
     patch_np  = best_patch.squeeze(0).permute(1, 2, 0).cpu().numpy()
     patch_bgr = cv2.cvtColor((patch_np * 255).astype(np.uint8), cv2.COLOR_RGB2BGR)
+
+    # --- 7a. Auto-versioned iteration folder ----------------------------
+    # Scans patterns/iterations/ for existing iteration_N dirs and creates
+    # the next one, preserving every run as evidence.
+    iterations_root = PROJECT_ROOT / "patterns" / "iterations"
+    iterations_root.mkdir(parents=True, exist_ok=True)
+    existing = [d for d in iterations_root.iterdir()
+                if d.is_dir() and d.name.startswith("iteration_")]
+    nums = []
+    for d in existing:
+        try:
+            nums.append(int(d.name.split("_")[1]))
+        except (IndexError, ValueError):
+            pass
+    next_n   = max(nums, default=0) + 1
+    iter_dir = iterations_root / f"iteration_{next_n}"
+    iter_dir.mkdir(parents=True, exist_ok=True)
+
+    iter_patch   = iter_dir / out_path.name
+    iter_preview = iter_dir / (out_path.stem + "_preview.png")
+    iter_params  = iter_dir / "params.txt"
+
+    cv2.imwrite(str(iter_patch), patch_bgr)
+    cv2.imwrite(str(iter_preview),
+                cv2.resize(patch_bgr, (512, 512), interpolation=cv2.INTER_NEAREST))
+
+    # Write training parameters for evidence
+    import datetime
+    with open(iter_params, "w") as f:
+        f.write(f"iteration      : {next_n}\n")
+        f.write(f"date           : {datetime.datetime.now().isoformat(timespec='seconds')}\n")
+        f.write(f"patch_size     : {patch_size}\n")
+        f.write(f"steps          : {args.steps}\n")
+        f.write(f"lr             : {args.lr}\n")
+        f.write(f"eps            : {args.eps}\n")
+        f.write(f"init           : {args.init}\n")
+        f.write(f"batch_size     : {args.batch_size}\n")
+        f.write(f"topk           : {args.topk}\n")
+        f.write(f"alpha_nps      : {args.alpha}\n")
+        f.write(f"beta_tv        : {args.beta}\n")
+        f.write(f"eot            : {not args.no_eot}\n")
+        f.write(f"device         : {device}\n")
+        f.write(f"baseline_loss  : {baseline_loss.item():.6f}\n")
+        f.write(f"final_loss     : {best_loss:.6f}\n")
+        f.write(f"loss_reduction : {reduction:.1f}%\n")
+        f.write(f"host_pool_size : {len(host_pool_t)}\n")
+        f.write(f"loss_mode      : mean (confidence suppression)\n")
+
+    print(f"[INFO] Iteration {next_n} saved → {iter_dir}")
+    print(f"         patch   : {iter_patch.name}")
+    print(f"         preview : {iter_preview.name}")
+    print(f"         params  : {iter_params.name}")
+
+    # --- 7b. Also overwrite flat 'latest' copy so apply_patch.py still works ---
+    out_path.parent.mkdir(parents=True, exist_ok=True)
     cv2.imwrite(str(out_path), patch_bgr)
-    print(f"[INFO] Patch saved  → {out_path}")
+    preview = out_path.parent / (out_path.stem + "_preview.png")
+    cv2.imwrite(str(preview),
+                cv2.resize(patch_bgr, (512, 512), interpolation=cv2.INTER_NEAREST))
+    print(f"[INFO] Latest copy → {out_path}")
 
     # Clean up checkpoint now that training is complete
     if ckpt_path.exists():
         ckpt_path.unlink()
         print(f"[INFO] Checkpoint removed (training complete)")
-
-    preview = out_path.parent / (out_path.stem + "_preview.png")
-    cv2.imwrite(str(preview), cv2.resize(patch_bgr, (512, 512), interpolation=cv2.INTER_NEAREST))
-    print(f"[INFO] Preview saved → {preview}")
 
 
 if __name__ == "__main__":

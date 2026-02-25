@@ -1,0 +1,18 @@
+iteration      : 1
+date           : 2026-02-25T14:16:06
+patch_size     : 160
+steps          : 8000
+lr             : 0.03
+init           : uniform
+batch_size     : 4
+alpha_nps      : 0.01
+beta_tv        : 2.5
+eot            : True
+device         : mps
+baseline_loss  : 0.187335
+final_loss     : 0.018375
+loss_reduction : 90.2%
+host_pool_size : 35
+loss_mode      : mean (confidence suppression)
+fn_rate        : 57.8% (107/185)
+conf_drop      : 28.1%
