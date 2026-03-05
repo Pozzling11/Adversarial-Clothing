@@ -23,3 +23,12 @@ results/*.csv
 
 # Model weights (large binary)
 *.pt
+
+# Large video files
+test videos/
+results/*.mp4
+results/*.mov
+results/*.MOV
+
+# Research PDFs
+*.pdf

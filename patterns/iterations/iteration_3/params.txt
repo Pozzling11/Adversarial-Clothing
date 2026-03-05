@@ -1,0 +1,22 @@
+iteration      : 3
+date           : 2026-02-28T19:04:27
+patch_size     : 200
+steps          : 8000
+lr             : 0.03
+eps            : 1.0
+init           : uniform
+batch_size     : 4
+topk           : 50
+alpha_nps      : 0.01
+beta_tv        : 2.5
+eot            : True
+eot_rot_range  : ±10.0°
+eot_persp      : ±20% corner jitter
+eot_jpeg_q     : 50–95
+eot_brightness : ±15%
+device         : mps
+baseline_loss  : 0.021328
+final_loss     : 0.015742
+loss_reduction : 26.2%
+host_pool_size : 35
+loss_mode      : mean (confidence suppression)

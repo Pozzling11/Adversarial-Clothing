@@ -1,0 +1,26 @@
+iteration      : 5
+date           : 2026-03-02T04:48:41
+patch_size     : 200
+steps          : 10000
+lr             : 0.03
+eps            : 1.0
+init           : uniform
+batch_size     : 4
+topk           : 50
+alpha_nps      : 0.01
+beta_tv        : 2.5
+eot            : True
+eot_rot_range  : ±10.0°
+eot_persp      : ±30% corner jitter
+eot_jpeg_q     : 50–95
+eot_brightness : ±15%
+eot_color_jit  : ±15% per-channel
+eot_print_noise: 0–8 std Gaussian
+device         : mps
+baseline_loss  : 0.193782
+final_loss     : 0.039978
+loss_reduction : 79.4%
+host_pool_size : 35
+loss_mode      : mean (confidence suppression)
+style_target   : patterns/targets/smiley.png
+style_weight   : 0.5
