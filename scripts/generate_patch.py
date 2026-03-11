@@ -33,6 +33,8 @@ import random
 import sys
 from pathlib import Path
 
+import math
+
 import cv2
 import numpy as np
 import torch
@@ -152,6 +154,17 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--letter-weight", type=float, default=0.2,
                    help="Weight for letter shape loss (default 0.2). Increase toward 0.5 for"
                         " a clearer letter at the cost of slightly weaker adversarial effect.")
+    # V-shape masked patch
+    p.add_argument("--v-shape", action="store_true",
+                   help="Use a V-shaped (shoulder/torso) patch mask instead of a square patch."
+                        " Requires --bbox-placement. Mask is loaded from --v-shape-mask.")
+    p.add_argument("--v-shape-mask", default="potential shapes/PotentialShape2.png",
+                   help="Path to V-shape reference PNG (dark shape on white background).")
+    p.add_argument("--v-width-frac", type=float, default=0.85,
+                   help="V-shape width as a fraction of the person bbox width (default 0.85).")
+    p.add_argument("--chin-fallback-frac", type=float, default=0.15,
+                   help="Fallback chin row as a fraction of bbox height below the top of the"
+                        " bbox, used when Haar face detection fails (default 0.15).")
     return p.parse_args()
 
 
@@ -267,6 +280,198 @@ def detect_person_bbox(
     best = int(boxes.conf.cpu().argmax())
     x1, y1, x2, y2 = boxes.xyxy[best].cpu().numpy().astype(int)
     return int(x1), int(y1), int(x2), int(y2)
+
+
+def detect_chin_row(
+    img_bgr: np.ndarray,
+    person_bbox: tuple[int, int, int, int],
+    fallback_frac: float = 0.15,
+) -> tuple[int, str]:
+    """
+    Detect the chin row for a person in img_bgr.
+
+    Strategy (Option B → Option A fallback):
+      1. Run OpenCV Haar cascade face detection on the full image.
+      2. Keep only faces whose centre falls within the upper 40% of the person
+         bbox — eliminates false positives from other people in the frame.
+      3. Chin = bottom edge of the largest qualifying face rectangle.
+      4. If no face is found, fall back to fallback_frac × bbox_height below
+         the top of the person bbox (Option A, default 15%).
+
+    Returns
+    -------
+    (chin_row, method) where method is 'haar' or 'fallback'.
+    chin_row is the absolute pixel row in img_bgr coordinates.
+    """
+    px1, py1, px2, py2 = person_bbox
+    pbbox_h = py2 - py1
+    fallback_row = py1 + int(pbbox_h * fallback_frac)
+
+    try:
+        gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+        face_cascade = cv2.CascadeClassifier(
+            cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
+        )
+        faces = face_cascade.detectMultiScale(
+            gray, scaleFactor=1.05, minNeighbors=4, minSize=(15, 15)
+        )
+        face_zone_y2 = py1 + int(pbbox_h * 0.40)
+        valid = [
+            (fx, fy, fw, fh) for (fx, fy, fw, fh) in faces
+            if py1 <= fy + fh // 2 <= face_zone_y2
+            and px1 <= fx + fw // 2 <= px2
+        ]
+        if not valid:
+            return fallback_row, 'fallback'
+        fx, fy, fw, fh = max(valid, key=lambda f: f[2] * f[3])
+        return fy + fh, 'haar'
+    except Exception:
+        return fallback_row, 'fallback'
+
+
+# ---------------------------------------------------------------------------
+# V-shape mask helpers
+# ---------------------------------------------------------------------------
+
+def load_v_shape_mask(path: str) -> tuple[np.ndarray, int]:
+    """
+    Load a V-shape mask from a PNG file (dark shape on white background).
+
+    Returns
+    -------
+    (shape_crop, centre_dip_row)
+        shape_crop     : (H, W) uint8 array, 255 inside V and 0 outside,
+                         tightly cropped to the shape bounding box.
+        centre_dip_row : first row in shape_crop where the centre column
+                         is active — used to anchor the arch under the chin.
+    """
+    raw = cv2.imread(str(PROJECT_ROOT / path) if not Path(path).is_absolute() else path,
+                     cv2.IMREAD_GRAYSCALE)
+    if raw is None:
+        raise FileNotFoundError(f"V-shape mask PNG not found: {path}")
+    _, bw = cv2.threshold(raw, 128, 255, cv2.THRESH_BINARY_INV)
+    coords = np.argwhere(bw > 0)
+    if coords.size == 0:
+        raise ValueError(f"V-shape mask PNG contains no dark pixels: {path}")
+    r0, r1 = int(coords[:, 0].min()), int(coords[:, 0].max())
+    c0, c1 = int(coords[:, 1].min()), int(coords[:, 1].max())
+    shape_crop = bw[r0:r1 + 1, c0:c1 + 1]
+    crop_h, crop_w = shape_crop.shape
+    centre_col = crop_w // 2
+    centre_dip_row = 0
+    for r in range(crop_h):
+        if shape_crop[r, centre_col] > 128:
+            centre_dip_row = r
+            break
+    return shape_crop, centre_dip_row
+
+
+def v_shape_placement(
+    bbox: tuple[int, int, int, int],
+    chin_row: int,
+    v_width_frac: float,
+    img_size: int,
+    shape_crop: np.ndarray,
+    centre_dip_row: int,
+) -> tuple[int, int, int, int, np.ndarray]:
+    """
+    Compute chin-anchored V-shape placement for a person bbox.
+
+    The arch of the V is pinned to chin_row; the shape is scaled to
+    v_width_frac × bbox_width preserving the aspect ratio of shape_crop.
+
+    Returns
+    -------
+    (row0, col0, v_width, v_height, mask_bin)
+        row0/col0  : top-left of the bounding rectangle in image coords
+                     (row0 may be negative — caller must clip when compositing).
+        v_width/v_height : pixel dimensions of the scaled mask.
+        mask_bin   : (v_height, v_width) uint8 array, 255 inside V, 0 outside.
+    """
+    x1, y1, x2, y2 = bbox
+    bbox_w = max(x2 - x1, 1)
+    cx = (x1 + x2) // 2
+    crop_h, crop_w = shape_crop.shape
+    v_width  = max(16, int(bbox_w * v_width_frac))
+    v_height = max(16, int(v_width * crop_h / crop_w))
+    mask_r   = cv2.resize(shape_crop, (v_width, v_height), interpolation=cv2.INTER_LINEAR)
+    _, mask_bin = cv2.threshold(mask_r, 64, 255, cv2.THRESH_BINARY)
+    scaled_dip = int(centre_dip_row * v_height / crop_h)
+    row0 = chin_row - scaled_dip
+    col0 = max(0, min(cx - v_width // 2, img_size - v_width))
+    return row0, col0, v_width, v_height, mask_bin
+
+
+def apply_v_shape_patch(
+    host_t: torch.Tensor,
+    patch_t: torch.Tensor,
+    row0: int,
+    col0: int,
+    v_width: int,
+    v_height: int,
+    mask_bin: np.ndarray,
+    device: torch.device,
+) -> torch.Tensor:
+    """
+    Differentiably composite a V-shaped patch onto a host image tensor.
+
+    patch_t is resized to (v_height, v_width) via F.interpolate so gradients
+    flow back to the canonical patch.  mask_bin gates which pixels are replaced.
+    The ROI is clipped to the image boundary so partial overflow is handled.
+    """
+    import torch.nn.functional as F
+    patch_scaled = F.interpolate(
+        patch_t, size=(v_height, v_width), mode="bilinear", align_corners=False
+    )  # (1, 3, v_height, v_width)
+    mask_f = torch.from_numpy(mask_bin.astype(np.float32) / 255.0).to(device)
+    mask_f = mask_f.unsqueeze(0).unsqueeze(0)  # (1, 1, v_height, v_width)
+
+    img_h = host_t.shape[2]
+    img_r0 = max(0, row0)
+    img_r1 = min(img_h, row0 + v_height)
+    msk_r0 = img_r0 - row0
+    msk_r1 = msk_r0 + (img_r1 - img_r0)
+    if img_r1 <= img_r0:
+        return host_t  # patch entirely above/below image
+
+    out = host_t.clone()
+    roi   = out[:, :, img_r0:img_r1, col0:col0 + v_width]
+    p_sl  = patch_scaled[:, :, msk_r0:msk_r1, :]
+    m_sl  = mask_f[:, :, msk_r0:msk_r1, :]
+    out[:, :, img_r0:img_r1, col0:col0 + v_width] = roi * (1.0 - m_sl) + p_sl * m_sl
+    return out
+
+
+def _apply_v_shape_bgr(
+    img_bgr: np.ndarray,
+    patch_bgr_full: np.ndarray,
+    row0: int,
+    col0: int,
+    v_width: int,
+    v_height: int,
+    mask_bin: np.ndarray,
+) -> np.ndarray:
+    """
+    Numpy equivalent of apply_v_shape_patch for use in eval / visualisation
+    functions that work with BGR arrays rather than tensors.
+    """
+    p_bgr = cv2.resize(patch_bgr_full, (v_width, v_height), interpolation=cv2.INTER_LINEAR)
+    mask_f = (mask_bin.astype(np.float32) / 255.0)[:, :, np.newaxis]  # (H, W, 1)
+    img_h = img_bgr.shape[0]
+    img_r0 = max(0, row0)
+    img_r1 = min(img_h, row0 + v_height)
+    msk_r0 = img_r0 - row0
+    msk_r1 = msk_r0 + (img_r1 - img_r0)
+    if img_r1 <= img_r0:
+        return img_bgr
+    out = img_bgr.copy()
+    roi   = out[img_r0:img_r1, col0:col0 + v_width].astype(np.float32)
+    p_sl  = p_bgr[msk_r0:msk_r1, :].astype(np.float32)
+    m_sl  = mask_f[msk_r0:msk_r1, :]
+    out[img_r0:img_r1, col0:col0 + v_width] = (
+        roi * (1.0 - m_sl) + p_sl * m_sl
+    ).clip(0, 255).astype(np.uint8)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -445,6 +650,138 @@ def eot_augment_tensor(composite: torch.Tensor) -> torch.Tensor:
     arr = arr / 255.0
     t = torch.from_numpy(arr.astype(np.float32)).permute(2, 0, 1).unsqueeze(0)
     t = t.to(composite.device)
+    return t
+
+
+# ── Helpers for differentiable EOT ───────────────────────────────────────────
+
+def _gaussian_kernel_2d(k: int, device: torch.device) -> torch.Tensor:
+    """Return a (3, 1, k, k) Gaussian kernel for depthwise conv2d."""
+    sigma = 0.3 * ((k - 1) * 0.5 - 1) + 0.8           # match OpenCV default
+    x = torch.arange(k, dtype=torch.float32, device=device) - k // 2
+    g = torch.exp(-x ** 2 / (2.0 * sigma ** 2))
+    g = g / g.sum()
+    kernel = g.unsqueeze(0) * g.unsqueeze(1)            # (k, k)
+    return kernel.unsqueeze(0).unsqueeze(0).expand(3, 1, k, k).contiguous()
+
+
+def eot_augment_differentiable(composite: torch.Tensor) -> torch.Tensor:
+    """
+    Fully differentiable EOT augmentation.
+
+    All geometric transforms (scale, rotation, perspective) are applied via
+    torch.nn.functional.grid_sample so gradients flow back to patch pixels.
+    Photometric transforms are pure tensor ops.  JPEG compression uses a
+    straight-through estimator so the forward YOLO pass sees a realistically
+    compressed image while gradients still flow through the patch.
+
+    Replaces: eot_augment_tensor(composite.detach()) + re-stamp.
+    """
+    t = composite                          # (1, 3, H, W) float32 [0, 1]
+    _, _, H, W = t.shape
+    device = t.device
+
+    # ── Photometric (tensor ops — differentiable) ─────────────────────────
+    # 1. Brightness + contrast
+    alpha = 1.0 + random.uniform(-EOT_BRIGHTNESS, EOT_BRIGHTNESS)
+    beta  = random.uniform(-40.0 / 255.0, 40.0 / 255.0)
+    t = torch.clamp(t * alpha + beta, 0.0, 1.0)
+
+    # 2. Gamma correction
+    gamma = random.uniform(*EOT_GAMMA_RANGE)
+    t = torch.clamp(t.pow(gamma), 0.0, 1.0)
+
+    # 3. Per-channel colour jitter
+    channels = list(t.unbind(dim=1))       # [ (1, H, W) × 3 ]
+    for c in range(3):
+        shift = random.uniform(-EOT_COLOR_JITTER, EOT_COLOR_JITTER)
+        channels[c] = torch.clamp(channels[c] + shift, 0.0, 1.0)
+    t = torch.stack(channels, dim=1)
+
+    # 4. Gaussian blur (depthwise conv — differentiable)
+    k = random.choice([1, 1, 3, 3,
+                       EOT_BLUR_MAX if EOT_BLUR_MAX % 2 == 1 else EOT_BLUR_MAX + 1])
+    if k > 1:
+        kern = _gaussian_kernel_2d(k, device)
+        t = torch.nn.functional.conv2d(t, kern, padding=k // 2, groups=3)
+
+    # ── Geometric (grid_sample — differentiable) ──────────────────────────
+    # 5. Scale + rotation as one affine grid
+    sc        = random.uniform(*EOT_SCALE_RANGE)
+    angle_rad = math.radians(random.uniform(-EOT_ROT_RANGE, EOT_ROT_RANGE))
+    ca = math.cos(angle_rad) / sc
+    sa = math.sin(angle_rad) / sc
+    theta = torch.tensor(
+        [[ca, -sa, 0.0],
+         [sa,  ca, 0.0]],
+        dtype=torch.float32, device=device,
+    ).unsqueeze(0)
+    grid = torch.nn.functional.affine_grid(theta, t.shape, align_corners=False)
+    t = torch.nn.functional.grid_sample(
+        t, grid, mode='bilinear', padding_mode='border', align_corners=False
+    )
+
+    # 6. Perspective warp — build sampling grid from inverted homography
+    jx = EOT_PERSP_JITTER * W
+    jy = EOT_PERSP_JITTER * H
+    src_pts = np.float32([[0, 0], [W, 0], [W, H], [0, H]])
+    dst_pts = np.float32([
+        [random.uniform(0, jx),     random.uniform(0, jy)],
+        [random.uniform(W - jx, W), random.uniform(0, jy)],
+        [random.uniform(W - jx, W), random.uniform(H - jy, H)],
+        [random.uniform(0, jx),     random.uniform(H - jy, H)],
+    ])
+    # Invert: grid_sample needs input coords for each output pixel
+    H_inv = cv2.getPerspectiveTransform(dst_pts, src_pts)
+    ys, xs = torch.meshgrid(
+        torch.arange(H, dtype=torch.float32, device=device),
+        torch.arange(W, dtype=torch.float32, device=device),
+        indexing='ij',
+    )
+    ones   = torch.ones(H * W, dtype=torch.float32, device=device)
+    coords = torch.stack([xs.reshape(-1), ys.reshape(-1), ones], dim=0)  # (3, N)
+    H_inv_t = torch.tensor(H_inv, dtype=torch.float32, device=device)
+    mapped  = H_inv_t @ coords                                           # (3, N)
+    w_hom   = mapped[2].clamp(min=1e-6)
+    gx = (mapped[0] / w_hom) / (W - 1) * 2.0 - 1.0
+    gy = (mapped[1] / w_hom) / (H - 1) * 2.0 - 1.0
+    persp_grid = torch.stack([gx, gy], dim=-1).reshape(1, H, W, 2)
+    t = torch.nn.functional.grid_sample(
+        t, persp_grid, mode='bilinear', padding_mode='border', align_corners=True
+    )
+
+    # ── Noise & shadow ────────────────────────────────────────────────────
+    # 7. Random shadow strip (tensor mask — differentiable)
+    if random.random() < EOT_SHADOW_PROB:
+        intensity = random.uniform(0.3, 0.7)
+        shadow = torch.ones(1, 1, H, W, dtype=torch.float32, device=device)
+        if random.random() < 0.5:
+            y1 = random.randint(0, H // 2)
+            y2 = random.randint(H // 2, H)
+            shadow[:, :, y1:y2, :] = intensity
+        else:
+            x1 = random.randint(0, W // 2)
+            x2 = random.randint(W // 2, W)
+            shadow[:, :, :, x1:x2] = intensity
+        t = t * shadow
+
+    # 8. Gaussian print noise (additive — differentiable)
+    if EOT_PRINT_NOISE > 0:
+        noise_std = random.uniform(0, EOT_PRINT_NOISE / 255.0)
+        t = torch.clamp(t + torch.randn_like(t) * noise_std, 0.0, 1.0)
+
+    # 9. JPEG simulation — straight-through estimator:
+    #    forward pass: YOLO sees the JPEG-compressed image (realistic).
+    #    backward pass: gradients flow through the pre-JPEG differentiable t.
+    quality = random.randint(EOT_JPEG_QUALITY[0], EOT_JPEG_QUALITY[1])
+    arr = (
+        t.detach().squeeze(0).permute(1, 2, 0).cpu().numpy() * 255
+    ).clip(0, 255).astype(np.uint8)
+    _, enc    = cv2.imencode(".jpg", arr, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
+    arr_dec   = cv2.imdecode(enc, cv2.IMREAD_COLOR).astype(np.float32) / 255.0
+    t_jpeg    = torch.from_numpy(arr_dec).permute(2, 0, 1).unsqueeze(0).to(device)
+    t = t_jpeg.detach() + (t - t.detach())   # STE: forward=jpeg, backward=clean
+
     return t
 
 
@@ -895,6 +1232,11 @@ def save_eval_samples(
     n_samples: int = 5,
     conf_thresh: float = 0.01,
     iou_match_thresh: float = 0.10,
+    v_shape_crop: np.ndarray | None = None,
+    v_centre_dip_row: int = 0,
+    v_width_frac: float = 0.85,
+    host_chins: list | None = None,
+    chin_fallback_frac: float = 0.15,
 ) -> None:
     """
     Save n_samples annotated evaluation images to out_dir/eval_samples/.
@@ -923,7 +1265,21 @@ def save_eval_samples(
         bb  = host_bboxes[idx] if (do_bbox_placement and idx < len(host_bboxes)) else None
 
         # ---- Composite patch ------------------------------------------------
-        if bb is not None and do_bbox_placement:
+        p_np  = patch_t.squeeze(0).permute(1, 2, 0).detach().cpu().numpy()
+        p_bgr_full = cv2.cvtColor((p_np * 255).astype(np.uint8), cv2.COLOR_RGB2BGR)
+
+        if v_shape_crop is not None and bb is not None and do_bbox_placement:
+            chin_row, _ = (
+                host_chins[idx]
+                if (host_chins is not None and idx < len(host_chins) and host_chins[idx] is not None)
+                else detect_chin_row(host_pool_bgr[idx], bb, chin_fallback_frac)
+            )
+            v_row0, v_col0, v_w, v_h, v_mask = v_shape_placement(
+                bb, chin_row, v_width_frac, IMG_SIZE, v_shape_crop, v_centre_dip_row
+            )
+            img = _apply_v_shape_bgr(img, p_bgr_full, v_row0, v_col0, v_w, v_h, v_mask)
+            p_row, p_col, comp_size = max(0, v_row0), v_col0, v_w
+        elif bb is not None and do_bbox_placement:
             x1, y1, x2, y2 = bb
             cx        = (x1 + x2) // 2
             cy        = (y1 + y2) // 2
@@ -931,15 +1287,14 @@ def save_eval_samples(
             comp_size = max(32, min(int(bbox_h * patch_fraction), IMG_SIZE // 2))
             p_row = max(0, min(cy - comp_size // 2, IMG_SIZE - comp_size))
             p_col = max(0, min(cx - comp_size // 2, IMG_SIZE - comp_size))
+            p_bgr = cv2.resize(p_bgr_full, (comp_size, comp_size))
+            img[p_row:p_row + comp_size, p_col:p_col + comp_size] = p_bgr
         else:
             p_row     = int(IMG_SIZE * 0.30)
             p_col     = (IMG_SIZE - patch_size) // 2
             comp_size = patch_size
-
-        p_np  = patch_t.squeeze(0).permute(1, 2, 0).detach().cpu().numpy()
-        p_bgr = cv2.cvtColor((p_np * 255).astype(np.uint8), cv2.COLOR_RGB2BGR)
-        p_bgr = cv2.resize(p_bgr, (comp_size, comp_size))
-        img[p_row:p_row + comp_size, p_col:p_col + comp_size] = p_bgr
+            p_bgr = cv2.resize(p_bgr_full, (comp_size, comp_size))
+            img[p_row:p_row + comp_size, p_col:p_col + comp_size] = p_bgr
 
         if hat_patch_t is not None and bb is not None and do_bbox_placement:
             h_row, h_col, h_size = hat_crown_placement(
@@ -1039,6 +1394,11 @@ def clean_eval_confidence(
     conf_thresh: float = 0.01,
     anchor_boxes: list | None = None,
     iou_match_thresh: float = 0.10,
+    v_shape_crop: np.ndarray | None = None,
+    v_centre_dip_row: int = 0,
+    v_width_frac: float = 0.85,
+    host_chins: list | None = None,
+    chin_fallback_frac: float = 0.15,
 ) -> tuple[float, list]:
     """
     Measure the average person-detection confidence across all host images.
@@ -1065,8 +1425,20 @@ def clean_eval_confidence(
 
         if patch_t is not None:
             bb = host_bboxes[i] if (do_bbox_placement and i < len(host_bboxes)) else None
+            p_np      = patch_t.squeeze(0).permute(1, 2, 0).detach().cpu().numpy()
+            p_bgr_full = cv2.cvtColor((p_np * 255).astype(np.uint8), cv2.COLOR_RGB2BGR)
 
-            if bb is not None and do_bbox_placement:
+            if v_shape_crop is not None and bb is not None and do_bbox_placement:
+                chin_row, _ = (
+                    host_chins[i]
+                    if (host_chins is not None and i < len(host_chins) and host_chins[i] is not None)
+                    else detect_chin_row(host_bgr, bb, chin_fallback_frac)
+                )
+                v_row0, v_col0, v_w, v_h, v_mask = v_shape_placement(
+                    bb, chin_row, v_width_frac, IMG_SIZE, v_shape_crop, v_centre_dip_row
+                )
+                img = _apply_v_shape_bgr(img, p_bgr_full, v_row0, v_col0, v_w, v_h, v_mask)
+            elif bb is not None and do_bbox_placement:
                 x1, y1, x2, y2 = bb
                 cx        = (x1 + x2) // 2
                 cy        = (y1 + y2) // 2
@@ -1074,15 +1446,14 @@ def clean_eval_confidence(
                 comp_size = max(32, min(int(bbox_h * patch_fraction), IMG_SIZE // 2))
                 row = max(0, min(cy - comp_size // 2, IMG_SIZE - comp_size))
                 col = max(0, min(cx - comp_size // 2, IMG_SIZE - comp_size))
+                p_bgr = cv2.resize(p_bgr_full, (comp_size, comp_size))
+                img[row:row + comp_size, col:col + comp_size] = p_bgr
             else:
                 row       = int(IMG_SIZE * 0.30)
                 col       = (IMG_SIZE - patch_size) // 2
                 comp_size = patch_size
-
-            p_np  = patch_t.squeeze(0).permute(1, 2, 0).detach().cpu().numpy()
-            p_bgr = cv2.cvtColor((p_np * 255).astype(np.uint8), cv2.COLOR_RGB2BGR)
-            p_bgr = cv2.resize(p_bgr, (comp_size, comp_size))
-            img[row:row + comp_size, col:col + comp_size] = p_bgr
+                p_bgr = cv2.resize(p_bgr_full, (comp_size, comp_size))
+                img[row:row + comp_size, col:col + comp_size] = p_bgr
 
             if hat_patch_t is not None and bb is not None and do_bbox_placement:
                 h_row, h_col, h_size = hat_crown_placement(
@@ -1210,6 +1581,10 @@ def main() -> None:
         print("[WARN] --hat-patch requires --bbox-placement. Enabling automatically.")
         args.bbox_placement = True
 
+    if args.v_shape and not args.bbox_placement:
+        print("[WARN] --v-shape requires --bbox-placement. Enabling automatically.")
+        args.bbox_placement = True
+
     # Pre-detect person bboxes for all host images when bbox-placement is on.
     # Done once here so we don't re-run detection every batch sample.
     host_bboxes: list[tuple[int, int, int, int] | None] = []
@@ -1225,6 +1600,27 @@ def main() -> None:
         if detected_count == 0:
             print("[WARN] No persons detected in any host image — falling back to torso-band placement.")
             args.bbox_placement = False
+
+    # V-shape: load mask + pre-detect chins (done once, reused every step)
+    v_shape_crop: np.ndarray | None = None
+    v_centre_dip_row: int = 0
+    host_chins: list | None = None
+    if args.v_shape:
+        v_shape_crop, v_centre_dip_row = load_v_shape_mask(args.v_shape_mask)
+        print(f"[INFO] V-shape mask loaded: {v_shape_crop.shape[1]}w × {v_shape_crop.shape[0]}h px  "
+              f"(centre dip row={v_centre_dip_row})")
+        print("[INFO] Pre-detecting chins for V-shape placement …")
+        host_chins = []
+        haar_count = 0
+        for bgr, bb in zip(host_pool_bgr, host_bboxes):
+            if bb is not None:
+                chin_row, method = detect_chin_row(bgr, bb, args.chin_fallback_frac)
+                host_chins.append((chin_row, method))
+                if method == 'haar':
+                    haar_count += 1
+            else:
+                host_chins.append(None)
+        print(f"[INFO]   chin detected via Haar: {haar_count}/{len(host_pool_bgr)}")
 
     # Re-pin model to device — yolo.predict() calls in detect_person_bbox can
     # silently move model weights back to CPU on MPS/CUDA systems.
@@ -1286,6 +1682,9 @@ def main() -> None:
         patch_size=patch_size, patch_fraction=args.patch_fraction,
         hat_fraction=args.hat_fraction, do_bbox_placement=args.bbox_placement,
         device=device,
+        v_shape_crop=v_shape_crop, v_centre_dip_row=v_centre_dip_row,
+        v_width_frac=args.v_width_frac, host_chins=host_chins,
+        chin_fallback_frac=args.chin_fallback_frac,
     )
     n_anchors = sum(1 for b in baseline_anchor_boxes if b is not None)
     print(f"[INFO] Clean baseline mean confidence : {clean_baseline:.6f}  ({n_anchors}/{len(host_pool_bgr)} subjects detected)")
@@ -1319,9 +1718,23 @@ def main() -> None:
                 idx = random.randrange(len(host_pool_t))
             host_t = host_pool_t[idx]
 
-            # (b) Placement — bbox-guided or torso-band fallback
-            if args.bbox_placement:
-                bb = host_bboxes[idx]
+            # (b) Placement — V-shape, bbox-guided, or torso-band fallback
+            bb = host_bboxes[idx] if host_bboxes else None
+            if args.v_shape and bb is not None:
+                chin_info = host_chins[idx] if (host_chins and host_chins[idx] is not None) else None
+                if chin_info is not None:
+                    chin_row, _ = chin_info
+                else:
+                    chin_row, _ = detect_chin_row(host_pool_bgr[idx], bb, args.chin_fallback_frac)
+                row0, col0, v_w, v_h, v_mask = v_shape_placement(
+                    bb, chin_row, args.v_width_frac, IMG_SIZE, v_shape_crop, v_centre_dip_row
+                )
+                composite = apply_v_shape_patch(
+                    host_t, patch, row0, col0, v_w, v_h, v_mask, device
+                )
+                # For hat compositing fallback (unchanged rectangular logic below)
+                row, col, composite_size = row0, col0, v_w
+            elif args.bbox_placement:
                 if bb is not None:
                     row, col, composite_size = bbox_guided_placement(
                         bb, patch_size, IMG_SIZE, args.patch_fraction
@@ -1329,12 +1742,11 @@ def main() -> None:
                 else:
                     row, col = random_torso_placement(IMG_SIZE, patch_size)
                     composite_size = patch_size
+                composite = apply_patch_resized(host_t, patch, row, col, composite_size)
             else:
                 row, col = random_torso_placement(IMG_SIZE, patch_size)
                 composite_size = patch_size
-
-            # (c) Composite torso patch onto host (resized to composite_size if needed)
-            composite = apply_patch_resized(host_t, patch, row, col, composite_size)
+                composite = apply_patch_resized(host_t, patch, row, col, composite_size)
 
             # (c2) Composite hat/crown patch on top — strictly face-free zone
             if hat_patch is not None and args.bbox_placement and host_bboxes[idx] is not None:
@@ -1343,18 +1755,13 @@ def main() -> None:
                 )
                 composite = apply_patch_resized(composite, hat_patch, h_row, h_col, h_size)
 
-            # (d) EOT: augment composite (stop-grad on augmentation transforms)
+            # (d) EOT: fully differentiable augmentation.
+            #     grid_sample carries gradients through scale/rotation/perspective
+            #     so the patch learns geometric robustness, not just photometric.
+            #     JPEG uses a straight-through estimator.
+            #     No re-stamp needed — patch is already baked into composite above.
             if not args.no_eot:
-                composite_aug = eot_augment_tensor(composite.detach())
-                # Re-apply both patches to the augmented background so gradients
-                # from photometric transforms still flow back to patch pixels.
-                composite_aug = apply_patch_resized(
-                    composite_aug.detach(), patch, row, col, composite_size
-                )
-                if hat_patch is not None and args.bbox_placement and host_bboxes[idx] is not None:
-                    composite_aug = apply_patch_resized(
-                        composite_aug, hat_patch, h_row, h_col, h_size
-                    )
+                composite_aug = eot_augment_differentiable(composite)
             else:
                 composite_aug = composite
 
@@ -1450,6 +1857,9 @@ def main() -> None:
         hat_fraction=args.hat_fraction, do_bbox_placement=args.bbox_placement,
         device=device,
         anchor_boxes=baseline_anchor_boxes,
+        v_shape_crop=v_shape_crop, v_centre_dip_row=v_centre_dip_row,
+        v_width_frac=args.v_width_frac, host_chins=host_chins,
+        chin_fallback_frac=args.chin_fallback_frac,
     )
     # Re-pin model after predict() calls
     torch_model.eval().to(device)
@@ -1504,6 +1914,9 @@ def main() -> None:
         hat_fraction=args.hat_fraction,
         do_bbox_placement=args.bbox_placement,
         out_dir=iter_dir / "eval_samples",
+        v_shape_crop=v_shape_crop, v_centre_dip_row=v_centre_dip_row,
+        v_width_frac=args.v_width_frac, host_chins=host_chins,
+        chin_fallback_frac=args.chin_fallback_frac,
     )
     # Re-pin model after predict() calls in save_eval_samples
     torch_model.eval().to(device)
@@ -1570,6 +1983,14 @@ def main() -> None:
             f.write(f"style_target   : none\n")
         f.write(f"letter         : {args.letter if args.letter else 'none'}\n")
         f.write(f"letter_weight  : {args.letter_weight}\n")
+        f.write(f"v_shape        : {args.v_shape}\n")
+        if args.v_shape:
+            f.write(f"v_shape_mask   : {args.v_shape_mask}\n")
+            f.write(f"v_width_frac   : {args.v_width_frac}\n")
+            f.write(f"chin_fallback  : {args.chin_fallback_frac}\n")
+            haar_hits = sum(1 for c in (host_chins or []) if c is not None and c[1] == 'haar')
+            total_chins = len(host_chins) if host_chins else 0
+            f.write(f"chin_haar_hits : {haar_hits}/{total_chins}\n")
 
     print(f"[INFO] Iteration {next_n} saved → {iter_dir}")
     print(f"         patch   : {iter_patch.name}")
