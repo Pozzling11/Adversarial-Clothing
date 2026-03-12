@@ -409,22 +409,20 @@ def apply_v_shape_patch(
     col0: int,
     v_width: int,
     v_height: int,
-    mask_bin: np.ndarray,
+    mask_f: torch.Tensor,       # (1,1,v_height,v_width) float32 on device — pre-built
     device: torch.device,
 ) -> torch.Tensor:
     """
     Differentiably composite a V-shaped patch onto a host image tensor.
 
     patch_t is resized to (v_height, v_width) via F.interpolate so gradients
-    flow back to the canonical patch.  mask_bin gates which pixels are replaced.
+    flow back to the canonical patch.  mask_f gates which pixels are replaced.
     The ROI is clipped to the image boundary so partial overflow is handled.
     """
     import torch.nn.functional as F
     patch_scaled = F.interpolate(
         patch_t, size=(v_height, v_width), mode="bilinear", align_corners=False
     )  # (1, 3, v_height, v_width)
-    mask_f = torch.from_numpy(mask_bin.astype(np.float32) / 255.0).to(device)
-    mask_f = mask_f.unsqueeze(0).unsqueeze(0)  # (1, 1, v_height, v_width)
 
     img_h = host_t.shape[2]
     img_r0 = max(0, row0)
@@ -718,7 +716,7 @@ def eot_augment_differentiable(composite: torch.Tensor) -> torch.Tensor:
     ).unsqueeze(0)
     grid = torch.nn.functional.affine_grid(theta, t.shape, align_corners=False)
     t = torch.nn.functional.grid_sample(
-        t, grid, mode='bilinear', padding_mode='border', align_corners=False
+        t, grid, mode='bilinear', padding_mode='zeros', align_corners=False
     )
 
     # 6. Perspective warp — build sampling grid from inverted homography
@@ -743,11 +741,11 @@ def eot_augment_differentiable(composite: torch.Tensor) -> torch.Tensor:
     H_inv_t = torch.tensor(H_inv, dtype=torch.float32, device=device)
     mapped  = H_inv_t @ coords                                           # (3, N)
     w_hom   = mapped[2].clamp(min=1e-6)
-    gx = (mapped[0] / w_hom) / (W - 1) * 2.0 - 1.0
-    gy = (mapped[1] / w_hom) / (H - 1) * 2.0 - 1.0
+    gx = (mapped[0] / w_hom) / (W * 0.5) - 1.0
+    gy = (mapped[1] / w_hom) / (H * 0.5) - 1.0
     persp_grid = torch.stack([gx, gy], dim=-1).reshape(1, H, W, 2)
     t = torch.nn.functional.grid_sample(
-        t, persp_grid, mode='bilinear', padding_mode='border', align_corners=True
+        t, persp_grid, mode='bilinear', padding_mode='zeros', align_corners=False
     )
 
     # ── Noise & shadow ────────────────────────────────────────────────────
@@ -1601,26 +1599,42 @@ def main() -> None:
             print("[WARN] No persons detected in any host image — falling back to torso-band placement.")
             args.bbox_placement = False
 
-    # V-shape: load mask + pre-detect chins (done once, reused every step)
+    # V-shape: load mask + pre-detect chins + pre-cache per-host placement (done once)
     v_shape_crop: np.ndarray | None = None
     v_centre_dip_row: int = 0
     host_chins: list | None = None
+    # host_v_placements[i] = (row0, col0, v_w, v_h, mask_tensor) or None
+    host_v_placements: list | None = None
     if args.v_shape:
         v_shape_crop, v_centre_dip_row = load_v_shape_mask(args.v_shape_mask)
         print(f"[INFO] V-shape mask loaded: {v_shape_crop.shape[1]}w × {v_shape_crop.shape[0]}h px  "
               f"(centre dip row={v_centre_dip_row})")
-        print("[INFO] Pre-detecting chins for V-shape placement …")
+        print("[INFO] Pre-detecting chins + caching V-shape placements …")
         host_chins = []
-        haar_count = 0
+        host_v_placements = []
+        haar_count, v_count = 0, 0
         for bgr, bb in zip(host_pool_bgr, host_bboxes):
             if bb is not None:
                 chin_row, method = detect_chin_row(bgr, bb, args.chin_fallback_frac)
                 host_chins.append((chin_row, method))
                 if method == 'haar':
                     haar_count += 1
+                row0, col0, v_w, v_h, mask_bin = v_shape_placement(
+                    bb, chin_row, args.v_width_frac, IMG_SIZE, v_shape_crop, v_centre_dip_row
+                )
+                # Pre-convert mask to float tensor on device so it's never
+                # re-allocated during the training loop
+                mask_t = torch.from_numpy(
+                    mask_bin.astype(np.float32) / 255.0
+                ).unsqueeze(0).unsqueeze(0).to(device)  # (1,1,v_h,v_w)
+                host_v_placements.append((row0, col0, v_w, v_h, mask_t))
+                v_count += 1
             else:
                 host_chins.append(None)
+                host_v_placements.append(None)
         print(f"[INFO]   chin detected via Haar: {haar_count}/{len(host_pool_bgr)}")
+        print(f"[INFO]   V-shape placements cached: {v_count}/{len(host_pool_bgr)} "
+              f"({len(host_pool_bgr) - v_count} hosts fall back to square torso placement)")
 
     # Re-pin model to device — yolo.predict() calls in detect_person_bbox can
     # silently move model weights back to CPU on MPS/CUDA systems.
@@ -1720,20 +1734,17 @@ def main() -> None:
 
             # (b) Placement — V-shape, bbox-guided, or torso-band fallback
             bb = host_bboxes[idx] if host_bboxes else None
-            if args.v_shape and bb is not None:
-                chin_info = host_chins[idx] if (host_chins and host_chins[idx] is not None) else None
-                if chin_info is not None:
-                    chin_row, _ = chin_info
-                else:
-                    chin_row, _ = detect_chin_row(host_pool_bgr[idx], bb, args.chin_fallback_frac)
-                row0, col0, v_w, v_h, v_mask = v_shape_placement(
-                    bb, chin_row, args.v_width_frac, IMG_SIZE, v_shape_crop, v_centre_dip_row
-                )
+            if args.v_shape and host_v_placements is not None and host_v_placements[idx] is not None:
+                row0, col0, v_w, v_h, mask_t = host_v_placements[idx]
                 composite = apply_v_shape_patch(
-                    host_t, patch, row0, col0, v_w, v_h, v_mask, device
+                    host_t, patch, row0, col0, v_w, v_h, mask_t, device
                 )
-                # For hat compositing fallback (unchanged rectangular logic below)
                 row, col, composite_size = row0, col0, v_w
+            elif args.v_shape and (host_v_placements is None or host_v_placements[idx] is None):
+                # No bbox detected for this host — fall back to square torso placement
+                row, col = random_torso_placement(IMG_SIZE, patch_size)
+                composite_size = patch_size
+                composite = apply_patch_resized(host_t, patch, row, col, composite_size)
             elif args.bbox_placement:
                 if bb is not None:
                     row, col, composite_size = bbox_guided_placement(
