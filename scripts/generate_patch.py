@@ -54,18 +54,18 @@ IMG_SIZE        = 640
 SUPPORTED_EXTS  = {".jpg", ".jpeg", ".png", ".bmp"}
 
 # EOT hyper-parameters applied to the composite during training
-EOT_SCALE_RANGE  = (0.35, 1.30)   # zoom range — simulates different viewing distances (0.35 = ~3× farther away)
+EOT_SCALE_RANGE  = (0.50, 1.20)   # zoom range — simulates different viewing distances
 EOT_ROT_RANGE    = 20.0           # degrees — wider rotation for head/body tilt
 EOT_BLUR_MAX     = 5              # max Gaussian kernel size
-EOT_BRIGHTNESS   = 0.50          # ± fraction — wide swing covers deep shade → bright sun
-EOT_PERSP_JITTER = 0.35          # max fractional corner displacement for perspective warp
-EOT_JPEG_QUALITY = (40, 95)      # random JPEG quality range (simulates camera compression)
+EOT_BRIGHTNESS   = 0.30          # ± fraction — matches iter13; severe swings hurt convergence
+EOT_PERSP_JITTER = 0.25          # max fractional corner displacement for perspective warp
+EOT_JPEG_QUALITY = (55, 95)      # random JPEG quality range (simulates camera compression)
 EOT_COLOR_JITTER = 0.20          # per-channel ± brightness shift (simulates ink colour shift)
-EOT_PRINT_NOISE  = 10.0          # max std-dev of Gaussian noise added (simulates print grain)
-EOT_HSV_HUE      = 25            # ± hue shift in degrees (covers sodium / daylight / fluorescent)
-EOT_HSV_SAT      = 0.45          # ± saturation multiplier (washed-out overexposure → vivid)
-EOT_SHADOW_PROB  = 0.65          # probability of adding a random shadow strip
-EOT_GAMMA_RANGE  = (0.45, 2.2)   # gamma ∈ (0,1) brightens (overexposed); >1 darkens (underexposed)
+EOT_PRINT_NOISE  = 8.0           # max std-dev of Gaussian noise added (simulates print grain)
+EOT_HSV_HUE      = 12            # ± hue shift in degrees (matches iter13)
+EOT_HSV_SAT      = 0.25          # ± saturation multiplier (matches iter13)
+EOT_SHADOW_PROB  = 0.40          # probability of adding a random shadow strip (matches iter13)
+EOT_GAMMA_RANGE  = (0.6, 1.8)    # narrower gamma range — avoids destroying patch signal
 
 
 # ---------------------------------------------------------------------------
@@ -88,6 +88,9 @@ def parse_args() -> argparse.Namespace:
                    help="PGD optimisation steps (default 1500)")
     p.add_argument("--lr",         type=float, default=0.02,
                    help="PGD step size (default 0.02)")
+    p.add_argument("--lr-min",     type=float, default=0.003,
+                   help="Minimum LR for cosine decay schedule (default 0.003). "
+                        "Set equal to --lr to disable decay.")
     p.add_argument("--eps",        type=float, default=1.0,
                    help="L-inf budget per pixel in [0,1] (default 1.0 = unconstrained)")
     p.add_argument("--topk",       type=int, default=TOP_K,
@@ -96,6 +99,14 @@ def parse_args() -> argparse.Namespace:
                    help="Images averaged per PGD step for smoother gradients (default 4)")
     p.add_argument("--no-eot",     action="store_true",
                    help="Disable EOT augmentation during training")
+    p.add_argument("--geo-warmup", type=float, default=0.25,
+                   help="Fraction of total steps with NO geometric EOT (photometric only)."
+                        " Lets patch learn strong signal before MPS-CPU fallback kicks in."
+                        " E.g. 0.25 = first 25%% of steps are photometric-only (default).")
+    p.add_argument("--geo-ramp",   type=float, default=0.40,
+                   help="Fraction of steps AFTER geo-warmup over which geo_prob ramps from 0 → 1"
+                        " (default 0.40 = next 40%% of total steps). After warmup+ramp, full"
+                        " geometric augmentation is applied every step.")
     p.add_argument("--alpha",      type=float, default=0.01,
                    help="Weight for NPS loss  (default 0.01; 0 = disabled)")
     p.add_argument("--beta",       type=float, default=2.5,
@@ -121,9 +132,13 @@ def parse_args() -> argparse.Namespace:
                    help="Detect person bbox each step and place+scale patch relative to it."
                         " Prevents the patch training on occlusion rather than adversarial signal.")
     p.add_argument("--patch-fraction", type=float, default=0.25,
-                   help="When --bbox-placement is set: patch composite height as a fraction of"
-                        " the person bbox height (default 0.25 ≈ 25%% of person height,"
-                        " realistic t-shirt chest print size).")
+                   help="When --bbox-placement is set: patch size as a fraction of the person"
+                        " bbox height (default) or width (when --torso-width is set)."
+                        " Default 0.25 ≈ 25%% of person height.")
+    p.add_argument("--torso-width", action="store_true",
+                   help="Size the bbox-guided patch from bbox WIDTH rather than height, so the"
+                        " patch spans the full torso. patch_fraction is applied to bbox_width"
+                        " (default 1.0 = full torso width; use --patch-fraction to scale).")
     p.add_argument("--hat-patch", action="store_true",
                    help="Also train a second adversarial crown patch placed on top of the head."
                         " Strictly clamped to the crown zone (top hat-fraction of bbox) so it"
@@ -663,17 +678,18 @@ def _gaussian_kernel_2d(k: int, device: torch.device) -> torch.Tensor:
     return kernel.unsqueeze(0).unsqueeze(0).expand(3, 1, k, k).contiguous()
 
 
-def eot_augment_differentiable(composite: torch.Tensor) -> torch.Tensor:
+def eot_augment_differentiable(composite: torch.Tensor, geo_prob: float = 1.0) -> torch.Tensor:
     """
-    Fully differentiable EOT augmentation.
+    Fully differentiable EOT augmentation with curriculum support.
 
-    All geometric transforms (scale, rotation, perspective) are applied via
-    torch.nn.functional.grid_sample so gradients flow back to patch pixels.
-    Photometric transforms are pure tensor ops.  JPEG compression uses a
-    straight-through estimator so the forward YOLO pass sees a realistically
-    compressed image while gradients still flow through the patch.
+    geo_prob : probability [0, 1] of applying geometric transforms (scale,
+               rotation, perspective).  Set to 0.0 early in training to avoid
+               the MPS grid_sample CPU fallback and let the patch learn a strong
+               photometric-robust signal first.
 
-    Replaces: eot_augment_tensor(composite.detach()) + re-stamp.
+    All geometric transforms are applied via torch.nn.functional.grid_sample so
+    gradients flow back to patch pixels.  Photometric transforms are pure tensor
+    ops.  JPEG uses a straight-through estimator.
     """
     t = composite                          # (1, 3, H, W) float32 [0, 1]
     _, _, H, W = t.shape
@@ -705,48 +721,49 @@ def eot_augment_differentiable(composite: torch.Tensor) -> torch.Tensor:
 
     # ── Geometric (grid_sample — differentiable) ──────────────────────────
     # 5. Scale + rotation as one affine grid
-    sc        = random.uniform(*EOT_SCALE_RANGE)
-    angle_rad = math.radians(random.uniform(-EOT_ROT_RANGE, EOT_ROT_RANGE))
-    ca = math.cos(angle_rad) / sc
-    sa = math.sin(angle_rad) / sc
-    theta = torch.tensor(
-        [[ca, -sa, 0.0],
-         [sa,  ca, 0.0]],
-        dtype=torch.float32, device=device,
-    ).unsqueeze(0)
-    grid = torch.nn.functional.affine_grid(theta, t.shape, align_corners=False)
-    t = torch.nn.functional.grid_sample(
-        t, grid, mode='bilinear', padding_mode='zeros', align_corners=False
-    )
+    if random.random() < geo_prob:
+        sc        = random.uniform(*EOT_SCALE_RANGE)
+        angle_rad = math.radians(random.uniform(-EOT_ROT_RANGE, EOT_ROT_RANGE))
+        ca = math.cos(angle_rad) / sc
+        sa = math.sin(angle_rad) / sc
+        theta = torch.tensor(
+            [[ca, -sa, 0.0],
+             [sa,  ca, 0.0]],
+            dtype=torch.float32, device=device,
+        ).unsqueeze(0)
+        grid = torch.nn.functional.affine_grid(theta, t.shape, align_corners=False)
+        t = torch.nn.functional.grid_sample(
+            t, grid, mode='bilinear', padding_mode='zeros', align_corners=False
+        )
 
-    # 6. Perspective warp — build sampling grid from inverted homography
-    jx = EOT_PERSP_JITTER * W
-    jy = EOT_PERSP_JITTER * H
-    src_pts = np.float32([[0, 0], [W, 0], [W, H], [0, H]])
-    dst_pts = np.float32([
-        [random.uniform(0, jx),     random.uniform(0, jy)],
-        [random.uniform(W - jx, W), random.uniform(0, jy)],
-        [random.uniform(W - jx, W), random.uniform(H - jy, H)],
-        [random.uniform(0, jx),     random.uniform(H - jy, H)],
-    ])
-    # Invert: grid_sample needs input coords for each output pixel
-    H_inv = cv2.getPerspectiveTransform(dst_pts, src_pts)
-    ys, xs = torch.meshgrid(
-        torch.arange(H, dtype=torch.float32, device=device),
-        torch.arange(W, dtype=torch.float32, device=device),
-        indexing='ij',
-    )
-    ones   = torch.ones(H * W, dtype=torch.float32, device=device)
-    coords = torch.stack([xs.reshape(-1), ys.reshape(-1), ones], dim=0)  # (3, N)
-    H_inv_t = torch.tensor(H_inv, dtype=torch.float32, device=device)
-    mapped  = H_inv_t @ coords                                           # (3, N)
-    w_hom   = mapped[2].clamp(min=1e-6)
-    gx = (mapped[0] / w_hom) / (W * 0.5) - 1.0
-    gy = (mapped[1] / w_hom) / (H * 0.5) - 1.0
-    persp_grid = torch.stack([gx, gy], dim=-1).reshape(1, H, W, 2)
-    t = torch.nn.functional.grid_sample(
-        t, persp_grid, mode='bilinear', padding_mode='zeros', align_corners=False
-    )
+        # 6. Perspective warp — build sampling grid from inverted homography
+        jx = EOT_PERSP_JITTER * W
+        jy = EOT_PERSP_JITTER * H
+        src_pts = np.float32([[0, 0], [W, 0], [W, H], [0, H]])
+        dst_pts = np.float32([
+            [random.uniform(0, jx),     random.uniform(0, jy)],
+            [random.uniform(W - jx, W), random.uniform(0, jy)],
+            [random.uniform(W - jx, W), random.uniform(H - jy, H)],
+            [random.uniform(0, jx),     random.uniform(H - jy, H)],
+        ])
+        # Invert: grid_sample needs input coords for each output pixel
+        H_inv = cv2.getPerspectiveTransform(dst_pts, src_pts)
+        ys, xs = torch.meshgrid(
+            torch.arange(H, dtype=torch.float32, device=device),
+            torch.arange(W, dtype=torch.float32, device=device),
+            indexing='ij',
+        )
+        ones   = torch.ones(H * W, dtype=torch.float32, device=device)
+        coords = torch.stack([xs.reshape(-1), ys.reshape(-1), ones], dim=0)  # (3, N)
+        H_inv_t = torch.tensor(H_inv, dtype=torch.float32, device=device)
+        mapped  = H_inv_t @ coords                                           # (3, N)
+        w_hom   = mapped[2].clamp(min=1e-6)
+        gx = (mapped[0] / w_hom) / (W * 0.5) - 1.0
+        gy = (mapped[1] / w_hom) / (H * 0.5) - 1.0
+        persp_grid = torch.stack([gx, gy], dim=-1).reshape(1, H, W, 2)
+        t = torch.nn.functional.grid_sample(
+            t, persp_grid, mode='bilinear', padding_mode='zeros', align_corners=False
+        )
 
     # ── Noise & shadow ────────────────────────────────────────────────────
     # 7. Random shadow strip (tensor mask — differentiable)
@@ -1180,31 +1197,36 @@ def bbox_guided_placement(
     patch_size: int,
     img_size: int,
     patch_fraction: float = 0.35,
+    torso_width: bool = False,
 ) -> tuple[int, int, int]:
     """
     Derive (row, col, composite_size) from a detected person bounding box.
 
-    composite_size = patch_fraction × bbox_height, clamped to [32, img_size//2].
-    This ensures the patch is always proportionally sized to the person regardless
-    of viewing distance — preventing the optimiser from exploiting occlusion.
+    By default: composite_size = patch_fraction × bbox_height.
+    With torso_width=True: composite_size = patch_fraction × bbox_width, so the
+    patch spans the full torso horizontally (use patch_fraction=1.0 for exact width).
 
     The anchor sits at 30% down from the top of the bbox (upper chest / t-shirt
-    print area — three-quarters up from the bottom).  ±20% bbox-height jitter
-    is applied each step so the patch generalises across realistic garment shift.
+    print area).  ±20% bbox-height jitter is applied each step.
     """
     x1, y1, x2, y2 = bbox
     cx  = (x1 + x2) // 2
     bbox_h = max(y2 - y1, 1)
-    # Upper chest anchor: 30% down from top of bbox
-    cy  = y1 + int(bbox_h * 0.30)
+    bbox_w = max(x2 - x1, 1)
 
-    composite_size = int(bbox_h * patch_fraction)
-    composite_size = max(32, min(composite_size, img_size // 2))
+    if torso_width:
+        # ~55% of bbox_w ≈ actual torso width (bbox includes arms/shoulders)
+        composite_size = int(bbox_w * patch_fraction * 0.55)
+        cy = y1 + int(bbox_h * 0.48)  # mid-chest anchor
+        jitter = int(bbox_h * 0.05)   # small vertical jitter only
+    else:
+        composite_size = int(bbox_h * patch_fraction)
+        cy = y1 + int(bbox_h * 0.30)  # upper chest anchor: 30% down from top
+        jitter = int(bbox_h * 0.20)
+    composite_size = max(32, min(composite_size, img_size))
 
-    jitter = int(bbox_h * 0.20)
     row = cy - composite_size // 2 + random.randint(-jitter, jitter)
     col = cx - composite_size // 2 + random.randint(-jitter, jitter)
-
     row = max(0, min(row, img_size - composite_size))
     col = max(0, min(col, img_size - composite_size))
 
@@ -1235,6 +1257,7 @@ def save_eval_samples(
     v_width_frac: float = 0.85,
     host_chins: list | None = None,
     chin_fallback_frac: float = 0.15,
+    torso_width: bool = False,
 ) -> None:
     """
     Save n_samples annotated evaluation images to out_dir/eval_samples/.
@@ -1280,9 +1303,14 @@ def save_eval_samples(
         elif bb is not None and do_bbox_placement:
             x1, y1, x2, y2 = bb
             cx        = (x1 + x2) // 2
-            cy        = (y1 + y2) // 2
             bbox_h    = max(y2 - y1, 1)
-            comp_size = max(32, min(int(bbox_h * patch_fraction), IMG_SIZE // 2))
+            bbox_w    = max(x2 - x1, 1)
+            if torso_width:
+                comp_size = max(32, min(int(bbox_w * patch_fraction * 0.55), IMG_SIZE))
+                cy = y1 + int(bbox_h * 0.48)
+            else:
+                comp_size = max(32, min(int(bbox_h * patch_fraction), IMG_SIZE))
+                cy = y1 + int(bbox_h * 0.30)
             p_row = max(0, min(cy - comp_size // 2, IMG_SIZE - comp_size))
             p_col = max(0, min(cx - comp_size // 2, IMG_SIZE - comp_size))
             p_bgr = cv2.resize(p_bgr_full, (comp_size, comp_size))
@@ -1397,6 +1425,7 @@ def clean_eval_confidence(
     v_width_frac: float = 0.85,
     host_chins: list | None = None,
     chin_fallback_frac: float = 0.15,
+    torso_width: bool = False,
 ) -> tuple[float, list]:
     """
     Measure the average person-detection confidence across all host images.
@@ -1439,9 +1468,14 @@ def clean_eval_confidence(
             elif bb is not None and do_bbox_placement:
                 x1, y1, x2, y2 = bb
                 cx        = (x1 + x2) // 2
-                cy        = (y1 + y2) // 2
                 bbox_h    = max(y2 - y1, 1)
-                comp_size = max(32, min(int(bbox_h * patch_fraction), IMG_SIZE // 2))
+                bbox_w    = max(x2 - x1, 1)
+                if torso_width:
+                    comp_size = max(32, min(int(bbox_w * patch_fraction * 0.55), IMG_SIZE))
+                    cy = y1 + int(bbox_h * 0.48)
+                else:
+                    comp_size = max(32, min(int(bbox_h * patch_fraction), IMG_SIZE))
+                    cy = y1 + int(bbox_h * 0.30)
                 row = max(0, min(cy - comp_size // 2, IMG_SIZE - comp_size))
                 col = max(0, min(cx - comp_size // 2, IMG_SIZE - comp_size))
                 p_bgr = cv2.resize(p_bgr_full, (comp_size, comp_size))
@@ -1518,13 +1552,16 @@ def main() -> None:
     print(f"[INFO] Device     : {device}")
     print(f"[INFO] Weights    : {args.model}")
     print(f"[INFO] Patch size : {patch_size}×{patch_size}")
-    print(f"[INFO] Steps      : {args.steps}  |  LR: {args.lr}  |  ε: {args.eps}")
+    print(f"[INFO] Steps      : {args.steps}  |  LR: {args.lr} → {args.lr_min} (cosine)  |  ε: {args.eps}")
     print(f"[INFO] EOT        : {'OFF' if args.no_eot else 'ON'}")
     print(f"[INFO] Init noise : {args.init}")
     print(f"[INFO] Loss mode  : mean (confidence suppression)")
     print(f"[INFO] Batch size : {args.batch_size} images/step")
     print(f"[INFO] NPS α      : {args.alpha}  |  TV β : {args.beta}")
     print(f"[INFO] BBox placement: {'ON  (patch fraction=' + str(args.patch_fraction) + ')' if args.bbox_placement else 'OFF (torso-band fallback)'}")
+    if not args.no_eot:
+        print(f"[INFO] EOT curriculum : geo warmup={args.geo_warmup:.0%} of steps, "
+              f"ramp={args.geo_ramp:.0%} of steps, then full geo")
     if args.hat_patch:
         hf = min(args.hat_fraction, _HAT_FACE_GUARD)
         print(f"[INFO] Hat/crown patch: ON  (hat fraction={hf}, face guard≤{_HAT_FACE_GUARD} of bbox h)")
@@ -1699,6 +1736,7 @@ def main() -> None:
         v_shape_crop=v_shape_crop, v_centre_dip_row=v_centre_dip_row,
         v_width_frac=args.v_width_frac, host_chins=host_chins,
         chin_fallback_frac=args.chin_fallback_frac,
+        torso_width=args.torso_width,
     )
     n_anchors = sum(1 for b in baseline_anchor_boxes if b is not None)
     print(f"[INFO] Clean baseline mean confidence : {clean_baseline:.6f}  ({n_anchors}/{len(host_pool_bgr)} subjects detected)")
@@ -1748,7 +1786,8 @@ def main() -> None:
             elif args.bbox_placement:
                 if bb is not None:
                     row, col, composite_size = bbox_guided_placement(
-                        bb, patch_size, IMG_SIZE, args.patch_fraction
+                        bb, patch_size, IMG_SIZE, args.patch_fraction,
+                        torso_width=args.torso_width,
                     )
                 else:
                     row, col = random_torso_placement(IMG_SIZE, patch_size)
@@ -1766,15 +1805,28 @@ def main() -> None:
                 )
                 composite = apply_patch_resized(composite, hat_patch, h_row, h_col, h_size)
 
-            # (d) EOT: fully differentiable augmentation.
-            #     grid_sample carries gradients through scale/rotation/perspective
-            #     so the patch learns geometric robustness, not just photometric.
-            #     JPEG uses a straight-through estimator.
-            #     No re-stamp needed — patch is already baked into composite above.
+            # (d) EOT: fully differentiable augmentation with curriculum.
+            #     Phase 1 (geo_warmup): photometric only — fast, full MPS speed.
+            #     Phase 2 (geo_ramp):  geo_prob ramps 0→1 — gradual geometric hardening.
+            #     Phase 3:             full geometric every step.
             if not args.no_eot:
-                composite_aug = eot_augment_differentiable(composite)
+                prog = (step - 1) / max(args.steps - 1, 1)   # 0.0 → 1.0
+                w    = args.geo_warmup
+                r    = args.geo_ramp
+                if prog < w:
+                    geo_prob = 0.0
+                elif prog < w + r:
+                    geo_prob = (prog - w) / r
+                else:
+                    geo_prob = 1.0
+                composite_aug = eot_augment_differentiable(composite, geo_prob=geo_prob)
             else:
+                prog     = (step - 1) / max(args.steps - 1, 1)
+                geo_prob = 1.0
                 composite_aug = composite
+
+            # Cosine LR decay: lr_curr = lr_min + 0.5*(lr - lr_min)*(1 + cos(π·prog))
+            lr_curr = args.lr_min + 0.5 * (args.lr - args.lr_min) * (1.0 + math.cos(math.pi * prog))
 
             # (e) Forward — IoU-guided if both flags are set and bbox is available
             _iou_bb = (
@@ -1816,7 +1868,7 @@ def main() -> None:
 
         # (g) PGD update — torso patch
         with torch.no_grad():
-            patch.data -= args.lr * patch.grad.sign()
+            patch.data -= lr_curr * patch.grad.sign()
             if args.eps < 1.0:
                 lower = (patch.data - args.eps).clamp(0.0, 1.0)
                 upper = (patch.data + args.eps).clamp(0.0, 1.0)
@@ -1826,7 +1878,7 @@ def main() -> None:
         # (g2) PGD update — hat patch
         if hat_patch is not None and hat_patch.grad is not None:
             with torch.no_grad():
-                hat_patch.data -= args.lr * hat_patch.grad.sign()
+                hat_patch.data -= lr_curr * hat_patch.grad.sign()
                 if args.eps < 1.0:
                     lower = (hat_patch.data - args.eps).clamp(0.0, 1.0)
                     upper = (hat_patch.data + args.eps).clamp(0.0, 1.0)
@@ -1853,7 +1905,7 @@ def main() -> None:
             torch.save(ckpt_data, ckpt_path)
 
         if args.verbose and step % 50 == 0:
-            print(f"  Step {step:>5d}/{args.steps}  loss: {loss.item():.6f}  best: {best_loss:.6f}")
+            print(f"  Step {step:>5d}/{args.steps}  loss: {loss.item():.6f}  best: {best_loss:.6f}  lr: {lr_curr:.5f}  geo: {geo_prob:.2f}")
 
     # ------------------------------------------------------------------
     # 6b. Post-training clean eval: same metric with best patch applied
@@ -1871,6 +1923,7 @@ def main() -> None:
         v_shape_crop=v_shape_crop, v_centre_dip_row=v_centre_dip_row,
         v_width_frac=args.v_width_frac, host_chins=host_chins,
         chin_fallback_frac=args.chin_fallback_frac,
+        torso_width=args.torso_width,
     )
     # Re-pin model after predict() calls
     torch_model.eval().to(device)
@@ -1928,6 +1981,7 @@ def main() -> None:
         v_shape_crop=v_shape_crop, v_centre_dip_row=v_centre_dip_row,
         v_width_frac=args.v_width_frac, host_chins=host_chins,
         chin_fallback_frac=args.chin_fallback_frac,
+        torso_width=args.torso_width,
     )
     # Re-pin model after predict() calls in save_eval_samples
     torch_model.eval().to(device)
@@ -1952,7 +2006,7 @@ def main() -> None:
         f.write(f"date           : {datetime.datetime.now().isoformat(timespec='seconds')}\n")
         f.write(f"patch_size     : {patch_size}\n")
         f.write(f"steps          : {args.steps}\n")
-        f.write(f"lr             : {args.lr}\n")
+        f.write(f"lr             : {args.lr} → {args.lr_min} (cosine decay)\n")
         f.write(f"eps            : {args.eps}\n")
         f.write(f"init           : {args.init}\n")
         f.write(f"batch_size     : {args.batch_size}\n")
@@ -1960,6 +2014,8 @@ def main() -> None:
         f.write(f"alpha_nps      : {args.alpha}\n")
         f.write(f"beta_tv        : {args.beta}\n")
         f.write(f"eot            : {not args.no_eot}\n")
+        f.write(f"eot_geo_warmup : {args.geo_warmup:.0%} of steps (photometric only)\n")
+        f.write(f"eot_geo_ramp   : {args.geo_ramp:.0%} of steps (geo_prob 0→1)\n")
         f.write(f"eot_rot_range  : ±{EOT_ROT_RANGE}°\n")
         f.write(f"eot_scale      : {EOT_SCALE_RANGE[0]}–{EOT_SCALE_RANGE[1]}×\n")
         f.write(f"eot_persp      : ±{EOT_PERSP_JITTER * 100:.0f}% corner jitter\n")
@@ -1980,6 +2036,7 @@ def main() -> None:
         f.write(f"loss_mode      : mean (confidence suppression)\n")
         f.write(f"bbox_placement : {args.bbox_placement}\n")
         f.write(f"patch_fraction : {args.patch_fraction}\n")
+        f.write(f"torso_width    : {args.torso_width}\n")
         f.write(f"hat_patch      : {args.hat_patch}\n")
         f.write(f"hat_fraction   : {min(args.hat_fraction, _HAT_FACE_GUARD)}\n")
         f.write(f"hat_face_guard : {_HAT_FACE_GUARD} (hard clamp — face never covered)\n")
