@@ -9,9 +9,8 @@ from pathlib import Path
 A3_W = int(297 / 25.4 * 300)   # 3508 px
 A3_H = int(420 / 25.4 * 300)   # 4961 px
 
-# Physical print size: 150mm x 150mm at 300 DPI
-PRINT_MM = 150
-PRINT_PX = int(PRINT_MM / 25.4 * 300)   # 1772 px
+# Fill the page: scale patch to full A3 width (297mm), centred vertically
+PRINT_PX = A3_W   # 3507 px = 297mm — fills the full width
 
 ROOT = Path(__file__).parent.parent
 

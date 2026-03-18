@@ -45,7 +45,7 @@ from ultralytics import YOLO
 # ---------------------------------------------------------------------------
 PROJECT_ROOT           = Path(__file__).resolve().parent.parent
 DEFAULT_WEIGHTS        = str(PROJECT_ROOT / "yolov8n.pt")
-DEFAULT_HOSTS          = str(PROJECT_ROOT / "data" / "clean")
+DEFAULT_HOSTS          = str(PROJECT_ROOT / "data" / "TRAINING LEG IMAGES")
 DEFAULT_PRINTABLE_COLS = str(PROJECT_ROOT / "data" / "printable_colors.txt")
 PERSON_CLASS    = 0
 PERSON_COL_IDX  = 4 + PERSON_CLASS   # channel index in (4+nc, N_anchors) layout
@@ -74,6 +74,8 @@ EOT_GAMMA_RANGE  = (0.6, 1.8)    # narrower gamma range — avoids destroying pa
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Adversarial patch generator (PGD v2) for YOLOv8n")
+    p.add_argument("--lambda-attn", type=float, default=1.0,
+                   help="Weight for attention redirection loss (default 1.0)")
     p.add_argument("--model",      default=DEFAULT_WEIGHTS,
                    help="Path to YOLOv8n .pt weights")
     p.add_argument("--hosts-dir",  default=DEFAULT_HOSTS,
@@ -200,11 +202,11 @@ def content_loss(patch: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
 # Image / tensor helpers
 # ---------------------------------------------------------------------------
 
-def load_bgr(path: str, size: int = IMG_SIZE) -> np.ndarray:
+def load_bgr(path: str) -> np.ndarray:
     img = cv2.imread(path)
     if img is None:
         sys.exit(f"[ERROR] Cannot read image: {path}")
-    return cv2.resize(img, (size, size))
+    return img
 
 
 def preprocess(bgr: np.ndarray) -> torch.Tensor:
@@ -228,7 +230,8 @@ def load_host_pool(hosts_dir: str, single_host: str | None) -> list[np.ndarray]:
     ]
     if not imgs:
         print("[WARN] No images found in hosts-dir. Using blank canvas.")
-        return [np.full((IMG_SIZE, IMG_SIZE, 3), 114, dtype=np.uint8)]
+        # Use a default 640x640 blank if no images, but otherwise always use original size
+        return [np.full((640, 640, 3), 114, dtype=np.uint8)]
     print(f"[INFO] Host pool  : {len(imgs)} image(s) from {d}")
     return imgs
 
@@ -1238,6 +1241,31 @@ def bbox_guided_placement(
 # ---------------------------------------------------------------------------
 
 def save_eval_samples(
+        # --- Export 5 images with rectangle placement overlay ---
+        rect_dir = out_dir / "../rectangle_overlays"
+        rect_dir = rect_dir.resolve()
+        rect_dir.mkdir(parents=True, exist_ok=True)
+        for idx in range(min(5, len(host_pool_bgr))):
+            host_img = host_pool_bgr[idx].copy()
+            leg_pts = get_leg_keypoints(idx)
+            if leg_pts is None:
+                continue
+            (x_hip, y_hip, conf_hip), (x_ankle, y_ankle, conf_ankle) = leg_pts
+            if conf_hip < 0.3 or conf_ankle < 0.3:
+                continue
+            import math
+            hip = np.array([x_hip, y_hip], dtype=np.float32)
+            ankle = np.array([x_ankle, y_ankle], dtype=np.float32)
+            leg_length = np.linalg.norm(ankle - hip)
+            rect_width = leg_length * 0.15 * 1.3
+            rect_height = leg_length
+            center = (hip + ankle) / 2
+            angle = math.degrees(math.atan2(ankle[1] - hip[1], ankle[0] - hip[0]))
+            box = cv2.boxPoints(((center[0], center[1]), (rect_height, rect_width), angle))
+            box = box.astype(np.int32)
+            overlay = host_img.copy()
+            cv2.polylines(overlay, [box], isClosed=True, color=(0,255,255), thickness=3)
+            cv2.imwrite(str(rect_dir / f"rectangle_overlay_{idx}.png"), overlay)
     yolo_wrapper,
     host_pool_bgr: list,
     host_bboxes: list,
@@ -1259,6 +1287,91 @@ def save_eval_samples(
     chin_fallback_frac: float = 0.15,
     torso_width: bool = False,
 ) -> None:
+    # ...existing code for eval sample saving...
+    # --- Saliency maps for 3 images with and without patch ---
+    from scripts.saliency_utils import yolo_saliency_map
+    import math
+    sal_dir = out_dir / "../saliency_maps"
+    sal_dir = sal_dir.resolve()
+    sal_dir.mkdir(parents=True, exist_ok=True)
+    num_sal = 3
+    device = patch_t.device if hasattr(patch_t, 'device') else torch.device('cpu')
+    best_patch = patch_t.detach().clone()
+    # Load YOLOv8-pose model and extract keypoints for all hosts (as in training)
+    from ultralytics import YOLO as YOLO_pose
+    pose_model = YOLO_pose('yolov8n-pose.pt')
+    pose_keypoints = []
+    img_shapes = []
+    for img in host_pool_bgr:
+        h0, w0 = img.shape[:2]
+        img_resized = cv2.resize(img, (640, 640), interpolation=cv2.INTER_LINEAR)
+        results = pose_model(img_resized)
+        kpts = results[0].keypoints.data.cpu().numpy() if results[0].keypoints is not None else []
+        # Scale keypoints back to original image size
+        if len(kpts) > 0:
+            scale_x = w0 / 640
+            scale_y = h0 / 640
+            kpts[:, :, 0] *= scale_x
+            kpts[:, :, 1] *= scale_y
+        pose_keypoints.append(kpts)
+        img_shapes.append((h0, w0))
+    def get_leg_keypoints(idx):
+        kpts = pose_keypoints[idx] if idx < len(pose_keypoints) and len(pose_keypoints[idx]) > 0 else None
+        if kpts is None or len(kpts) == 0:
+            return None
+        person_kpts = kpts[0]  # first detected person
+        hip_idx, ankle_idx = 12, 16
+        x_hip, y_hip, conf_hip = person_kpts[hip_idx]
+        x_ankle, y_ankle, conf_ankle = person_kpts[ankle_idx]
+        return (x_hip, y_hip, conf_hip), (x_ankle, y_ankle, conf_ankle)
+    for idx in range(min(num_sal, len(host_pool_bgr))):
+        host_img = host_pool_bgr[idx]
+        h0, w0 = img_shapes[idx]
+        # Saliency on clean image
+        img_t_clean = torch.from_numpy(host_img.transpose(2,0,1)).unsqueeze(0).float() / 255.0
+        sal_clean = yolo_saliency_map(yolo_wrapper, img_t_clean, device)
+        sal_clean_vis = (sal_clean*255).astype(np.uint8)
+        sal_clean_vis = cv2.applyColorMap(sal_clean_vis, cv2.COLORMAP_JET)
+        cv2.imwrite(str(sal_dir / f"saliency_{idx}_clean.png"), sal_clean_vis)
+        # Saliency with patch (if keypoints available)
+        leg_pts = get_leg_keypoints(idx)
+        if leg_pts is None:
+            continue
+        (x_hip, y_hip, conf_hip), (x_ankle, y_ankle, conf_ankle) = leg_pts
+        if conf_hip < 0.3 or conf_ankle < 0.3:
+            continue
+        hip = np.array([x_hip, y_hip], dtype=np.float32)
+        ankle = np.array([x_ankle, y_ankle], dtype=np.float32)
+        leg_length = np.linalg.norm(ankle - hip)
+        rect_width = leg_length * 0.15 * 1.3
+        rect_height = leg_length
+        center = (hip + ankle) / 2
+        angle = math.degrees(math.atan2(ankle[1] - hip[1], ankle[0] - hip[0]))
+        box = cv2.boxPoints(((center[0], center[1]), (rect_height, rect_width), angle))
+        box = box.astype(np.int32)
+        mask_np = np.zeros((h0, w0), dtype=np.uint8)
+        cv2.drawContours(mask_np, [box], 0, 1, -1)
+        # Compose patch on host image (simulate as in training)
+        host_t = torch.from_numpy(host_img.transpose(2,0,1)).unsqueeze(0).float() / 255.0
+        patch_t = best_patch
+        patch_rgb = patch_t.squeeze(0).permute(1,2,0).cpu().numpy()
+        patch_rgb = cv2.resize(patch_rgb, (rect_width.astype(int), rect_height.astype(int)), interpolation=cv2.INTER_LINEAR)
+        M = cv2.getRotationMatrix2D((rect_width/2, rect_height/2), angle, 1.0)
+        patch_rot = cv2.warpAffine(patch_rgb, M, (rect_width.astype(int), rect_height.astype(int)))
+        x0 = int(center[0] - rect_height/2)
+        y0 = int(center[1] - rect_width/2)
+        img_overlay = host_img.copy()
+        ph, pw = patch_rot.shape[:2]
+        x1, y1 = max(0, x0), max(0, y0)
+        x2, y2 = min(h0, x0+ph), min(w0, y0+pw)
+        patch_crop = patch_rot[max(0,-x0):ph-(x0+ph-x2), max(0,-y0):pw-(y0+pw-y2)]
+        if patch_crop.shape[0] > 0 and patch_crop.shape[1] > 0:
+            img_overlay[x1:x2, y1:y2] = (patch_crop*255).astype(np.uint8)
+        img_t = torch.from_numpy(img_overlay.transpose(2,0,1)).unsqueeze(0).float() / 255.0
+        sal = yolo_saliency_map(yolo_wrapper, img_t, device)
+        sal_vis = (sal*255).astype(np.uint8)
+        sal_vis = cv2.applyColorMap(sal_vis, cv2.COLORMAP_JET)
+        cv2.imwrite(str(sal_dir / f"saliency_{idx}.png"), sal_vis)
     """
     Save n_samples annotated evaluation images to out_dir/eval_samples/.
 
@@ -1758,6 +1871,7 @@ def main() -> None:
         #       Each sample uses a different host + placement + EOT augmentation
         #       so the gradient points toward suppression that works everywhere.
         obj_losses = []
+        attn_losses = []
         for _ in range(args.batch_size):
             # (a) Sample host — hard-mining weighted or uniform.
             #     Hard-mining gives higher probability to hosts where the patch
@@ -1772,6 +1886,66 @@ def main() -> None:
 
             # (b) Placement — V-shape, bbox-guided, or torso-band fallback
             bb = host_bboxes[idx] if host_bboxes else None
+            # --- LEG PATCH: get hip and ankle keypoints (replace with your logic) ---
+            # For demonstration, assume you have a function get_leg_keypoints(idx) returning (x_hip, y_hip, conf_hip), (x_ankle, y_ankle, conf_ankle)
+            # Replace this with your actual keypoint extraction logic
+            # --- LEG PATCH: get hip and ankle keypoints from YOLOv8-pose ---
+            # Load pose model once
+            if step == start_step + 1 and _ == 0:
+                pose_model = YOLO('yolov8n-pose.pt')
+                pose_img_files = [h for h in sorted(Path(args.hosts_dir).iterdir()) if h.suffix.lower() in SUPPORTED_EXTS and not h.name.startswith("._")]
+                pose_keypoints = []
+                for img_path in pose_img_files:
+                    img = cv2.imread(str(img_path))
+                    results = pose_model(img)
+                    kpts = results[0].keypoints.data.cpu().numpy() if results[0].keypoints is not None else []
+                    pose_keypoints.append(kpts)
+            # Helper to get hip/ankle for current idx (first person only)
+            def get_leg_keypoints(idx):
+                kpts = pose_keypoints[idx] if idx < len(pose_keypoints) and len(pose_keypoints[idx]) > 0 else None
+                if kpts is None or len(kpts) == 0:
+                    return None
+                person_kpts = kpts[0]  # first detected person
+                hip_idx, ankle_idx = 12, 16
+                x_hip, y_hip, conf_hip = person_kpts[hip_idx]
+                x_ankle, y_ankle, conf_ankle = person_kpts[ankle_idx]
+                return (x_hip, y_hip, conf_hip), (x_ankle, y_ankle, conf_ankle)
+            leg_pts = get_leg_keypoints(idx)
+            if leg_pts is None:
+                continue  # skip if no keypoints
+            (x_hip, y_hip, conf_hip), (x_ankle, y_ankle, conf_ankle) = leg_pts
+            if conf_hip < 0.3 or conf_ankle < 0.3:
+                continue  # skip if low confidence
+
+            # --- Create patch mask (rectangle between hip and ankle) ---
+            patch_mask = torch.zeros((1, 1, IMG_SIZE, IMG_SIZE), device=device)
+            # Use rectangle width logic from your visualization script
+            import math
+            hip = np.array([x_hip, y_hip], dtype=np.float32)
+            ankle = np.array([x_ankle, y_ankle], dtype=np.float32)
+            leg_length = np.linalg.norm(ankle - hip)
+            rect_width = leg_length * 0.15 * 1.3
+            rect_height = leg_length
+            center = (hip + ankle) / 2
+            angle = math.degrees(math.atan2(ankle[1] - hip[1], ankle[0] - hip[0]))
+            box = cv2.boxPoints(((center[0], center[1]), (rect_height, rect_width), angle))
+            box = box.astype(np.int32)
+            # Draw filled rotated rectangle on mask
+            mask_np = np.zeros((IMG_SIZE, IMG_SIZE), dtype=np.uint8)
+            cv2.drawContours(mask_np, [box], 0, 1, -1)
+            patch_mask[0, 0] = torch.from_numpy(mask_np).to(device)
+
+            # --- Debug visualization: save overlay of patch mask and patch region on host image ---
+            import os
+            debug_dir = "debug_leg_patch_overlays"
+            os.makedirs(debug_dir, exist_ok=True)
+            host_img = (host_t.squeeze(0).permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
+            vis_mask = (mask_np * 255).astype(np.uint8)
+            overlay = cv2.addWeighted(host_img, 0.7, cv2.cvtColor(vis_mask, cv2.COLOR_GRAY2BGR), 0.3, 0)
+            # Draw the rectangle outline for the patch region
+            cv2.polylines(overlay, [box], isClosed=True, color=(0,255,255), thickness=2)
+            cv2.imwrite(os.path.join(debug_dir, f"overlay_{idx}_step{step}_batch{_}.png"), overlay)
+
             if args.v_shape and host_v_placements is not None and host_v_placements[idx] is not None:
                 row0, col0, v_w, v_h, mask_t = host_v_placements[idx]
                 composite = apply_v_shape_patch(
@@ -1820,10 +1994,12 @@ def main() -> None:
                 else:
                     geo_prob = 1.0
                 composite_aug = eot_augment_differentiable(composite, geo_prob=geo_prob)
+                patch_mask_aug = eot_augment_differentiable(patch_mask, geo_prob=geo_prob)
             else:
                 prog     = (step - 1) / max(args.steps - 1, 1)
                 geo_prob = 1.0
                 composite_aug = composite
+                patch_mask_aug = patch_mask
 
             # Cosine LR decay: lr_curr = lr_min + 0.5*(lr - lr_min)*(1 + cos(π·prog))
             lr_curr = args.lr_min + 0.5 * (args.lr - args.lr_min) * (1.0 + math.cos(math.pi * prog))
@@ -1848,8 +2024,36 @@ def main() -> None:
                     0.9 * host_conf_ema[idx] + 0.1 * sample_loss.detach().item()
                 )
 
+            # --- Attention Redirection Loss ---
+            composite_aug.requires_grad_(True)
+            pred = torch_model(composite_aug)
+            if isinstance(pred, (list, tuple)):
+                pred = pred[0]
+            person_score = pred[0, PERSON_COL_IDX, :].mean()  # mean over anchors
+            torch_model.zero_grad()
+            if composite_aug.grad is not None:
+                composite_aug.grad.zero_()
+            person_score.backward(retain_graph=True)
+            saliency = composite_aug.grad.abs().max(dim=1)[0]  # (1, H, W)
+            # For body mask, use bbox or full image (replace with segmentation if available)
+            if bb is not None:
+                body_mask = torch.zeros_like(patch_mask_aug)
+                x1, y1, x2, y2 = bb
+                body_mask[:, :, y1:y2, x1:x2] = 1.0
+            else:
+                body_mask = torch.ones_like(patch_mask_aug)
+            # Calculate means
+            patch_mask_bin = patch_mask_aug.squeeze(1)
+            body_mask_bin = body_mask.squeeze(1)
+            L_in = (saliency * patch_mask_bin).sum() / patch_mask_bin.sum().clamp(min=1.0)
+            L_out = (saliency * body_mask_bin * (1 - patch_mask_bin)).sum() / (body_mask_bin * (1 - patch_mask_bin)).sum().clamp(min=1.0)
+            attn_loss = -(L_in - args.lambda_attn * L_out)
+            attn_losses.append(attn_loss.detach())
+
         # (e) Mean objectness loss + regularisation (NPS/TV added once, not per sample)
         loss = sum(obj_losses) / len(obj_losses)
+        if attn_losses:
+            loss = loss + sum(attn_losses) / len(attn_losses)
         if args.alpha > 0 and printable_colors is not None:
             loss = loss + args.alpha * nps_loss(patch, printable_colors)
             if hat_patch is not None:
@@ -1983,6 +2187,36 @@ def main() -> None:
         chin_fallback_frac=args.chin_fallback_frac,
         torso_width=args.torso_width,
     )
+    # Save debug overlays for 5 images using the final patch and mask
+    import os
+    debug_dir = "debug_leg_patch_overlays"
+    os.makedirs(debug_dir, exist_ok=True)
+    num_debug = 5
+    for idx in range(min(num_debug, len(host_pool_bgr))):
+        host_img = host_pool_bgr[idx]
+        # Use the same keypoint/leg logic as in training
+        leg_pts = get_leg_keypoints(idx)
+        if leg_pts is None:
+            continue
+        (x_hip, y_hip, conf_hip), (x_ankle, y_ankle, conf_ankle) = leg_pts
+        if conf_hip < 0.3 or conf_ankle < 0.3:
+            continue
+        import math
+        hip = np.array([x_hip, y_hip], dtype=np.float32)
+        ankle = np.array([x_ankle, y_ankle], dtype=np.float32)
+        leg_length = np.linalg.norm(ankle - hip)
+        rect_width = leg_length * 0.15 * 1.3
+        rect_height = leg_length
+        center = (hip + ankle) / 2
+        angle = math.degrees(math.atan2(ankle[1] - hip[1], ankle[0] - hip[0]))
+        box = cv2.boxPoints(((center[0], center[1]), (rect_height, rect_width), angle))
+        box = box.astype(np.int32)
+        mask_np = np.zeros((host_img.shape[0], host_img.shape[1]), dtype=np.uint8)
+        cv2.drawContours(mask_np, [box], 0, 1, -1)
+        vis_mask = (mask_np * 255).astype(np.uint8)
+        overlay = cv2.addWeighted(host_img, 0.7, cv2.cvtColor(vis_mask, cv2.COLOR_GRAY2BGR), 0.3, 0)
+        cv2.polylines(overlay, [box], isClosed=True, color=(0,255,255), thickness=2)
+        cv2.imwrite(os.path.join(debug_dir, f"overlay_{idx}_final.png"), overlay)
     # Re-pin model after predict() calls in save_eval_samples
     torch_model.eval().to(device)
     for p in torch_model.parameters():

@@ -1,0 +1,55 @@
+iteration      : 19
+date           : 2026-03-15T20:55:51
+patch_size     : 160
+steps          : 0
+lr             : 0.02 → 0.003 (cosine decay)
+eps            : 1.0
+init           : gray
+batch_size     : 1
+topk           : 50
+alpha_nps      : 0.0
+beta_tv        : 0.0
+eot            : True
+eot_geo_warmup : 25% of steps (photometric only)
+eot_geo_ramp   : 40% of steps (geo_prob 0→1)
+eot_rot_range  : ±20.0°
+eot_scale      : 0.5–1.2×
+eot_persp      : ±25% corner jitter
+eot_jpeg_q     : 55–95
+eot_brightness : ±30%
+eot_gamma      : 0.6–1.8
+eot_hsv_hue    : ±12°
+eot_hsv_sat    : ±25%
+eot_shadow     : p=0.4
+eot_color_jit  : ±20% per-channel
+eot_print_noise: 0–8 std Gaussian
+device         : mps
+clean_baseline : 0.878471
+clean_final    : 0.642082
+final_loss     : inf
+loss_reduction : 26.9%
+host_pool_size : 55
+loss_mode      : mean (confidence suppression)
+bbox_placement : True
+patch_fraction : 0.25
+torso_width    : False
+hat_patch      : False
+hat_fraction   : 0.08
+hat_face_guard : 0.12 (hard clamp — face never covered)
+iou_loss       : False
+iou_sigma      : 0.5
+hard_mining    : False
+hard_temp      : 0.5
+style_target   : none
+letter         : none
+letter_weight  : 0.2
+v_shape        : True
+v_shape_mask   : potential shapes/Potential shape 3.png
+v_width_frac   : 0.78
+chin_fallback  : 0.15
+v_face_fit     : True
+v_opening_scale: 1.05
+face_fallback  : 0.17
+face_size_fb   : 0.18
+chin_haar_hits : 40/55
+face_haar_hits : 41/55
