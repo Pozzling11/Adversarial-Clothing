@@ -1,0 +1,11 @@
+steps=12000  lr=0.03  lr-min=0.003  init=uniform
+alpha=0.01  beta=2.5  batch-size=8
+bbox-placement  patch-fraction=1.0  torso-width
+iou-loss  iou-sigma=0.5  hard-mining  hard-temp=0.5
+geo-warmup=0.20  geo-ramp=0.25
+hosts-dir=data/clean (52 images)
+best_conf_suppression=-44.8%  (best_obj updated at step ~10540)
+suppressed(<0.25)=13/52  at end
+patch_best  = checkpoint at best_obj (step ~10540)
+patch_final = patch state after exactly 12000 steps
+JPEG fix (real cv2 JPEG + STE) applied this run

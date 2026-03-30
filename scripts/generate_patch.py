@@ -29,6 +29,8 @@ Usage
 """
 
 import argparse
+import hashlib
+import json
 import random
 import sys
 from pathlib import Path
@@ -45,16 +47,23 @@ from ultralytics import YOLO
 # ---------------------------------------------------------------------------
 PROJECT_ROOT           = Path(__file__).resolve().parent.parent
 DEFAULT_WEIGHTS        = str(PROJECT_ROOT / "yolov8n.pt")
-DEFAULT_HOSTS          = str(PROJECT_ROOT / "data" / "TRAINING LEG IMAGES _preprocessed")
+DEFAULT_HOSTS          = str(PROJECT_ROOT / "data" / "clean")
 DEFAULT_PRINTABLE_COLS = str(PROJECT_ROOT / "data" / "printable_colors.txt")
 PERSON_CLASS    = 0
 PERSON_COL_IDX  = 4 + PERSON_CLASS   # channel index in (4+nc, N_anchors) layout
 TOP_K           = 50
 IMG_SIZE        = 640
-SUPPORTED_EXTS  = {".jpg", ".jpeg", ".png", ".bmp"}
+SUPPORTED_EXTS  = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".avif"}
 
 # EOT hyper-parameters applied to the composite during training
-EOT_SCALE_RANGE  = (0.50, 1.20)   # zoom range — simulates different viewing distances
+EOT_SCALE_RANGE       = (0.50, 1.20)  # close-up zoom band — realistic 2–8m viewing distance
+EOT_SCALE_RANGE_MED   = (0.35, 0.55)  # medium-distance band (~8–10m)
+EOT_SCALE_RANGE_FAR   = (0.15, 0.35)  # far-distance band (~10–15m)
+EOT_MED_VIEW_PROB     = 0.25          # 25% of steps use medium-distance scale
+EOT_FAR_VIEW_PROB     = 0.15          # 15% of steps use far-distance scale
+                                       # 60% close / 25% medium / 15% far
+                                       # Keeps close-up gradient dominant while building
+                                       # far-distance robustness
 EOT_ROT_RANGE    = 20.0           # degrees — wider rotation for head/body tilt
 EOT_BLUR_MAX     = 5              # max Gaussian kernel size
 EOT_BRIGHTNESS   = 0.30          # ± fraction — matches iter13; severe swings hurt convergence
@@ -66,6 +75,11 @@ EOT_HSV_HUE      = 12            # ± hue shift in degrees (matches iter13)
 EOT_HSV_SAT      = 0.25          # ± saturation multiplier (matches iter13)
 EOT_SHADOW_PROB  = 0.40          # probability of adding a random shadow strip (matches iter13)
 EOT_GAMMA_RANGE  = (0.6, 1.8)    # narrower gamma range — avoids destroying patch signal
+EOT_WRINKLE_PROB = 0.50          # probability of applying cloth-wrinkle deformation per step
+EOT_WRINKLE_STRENGTH = 0.08      # max displacement as fraction of patch size (0.08 = subtle folds)
+EOT_POS_JITTER  = 0.10           # ±10% positional jitter relative to patch region size
+                                   # Matches real t-shirt shift (~3-5cm on ~40cm torso)
+                                   # and covers a full stride-16 anchor cell
 
 
 # ---------------------------------------------------------------------------
@@ -74,8 +88,10 @@ EOT_GAMMA_RANGE  = (0.6, 1.8)    # narrower gamma range — avoids destroying pa
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Adversarial patch generator (PGD v2) for YOLOv8n")
-    p.add_argument("--lambda-attn", type=float, default=1.0,
-                   help="Weight for attention redirection loss (default 1.0)")
+    p.add_argument("--lambda-attn", type=float, default=0.0,
+                   help="Weight for attention redirection loss (default 0.0 = disabled)")
+    p.add_argument("--log-file", default=None,
+                   help="Write all training output to this file in addition to stdout")
     p.add_argument("--model",      default=DEFAULT_WEIGHTS,
                    help="Path to YOLOv8n .pt weights")
     p.add_argument("--hosts-dir",  default=DEFAULT_HOSTS,
@@ -88,17 +104,17 @@ def parse_args() -> argparse.Namespace:
                    help="Patch side length in pixels (default 256)")
     p.add_argument("--steps",      type=int, default=1500,
                    help="PGD optimisation steps (default 1500)")
-    p.add_argument("--lr",         type=float, default=0.02,
-                   help="PGD step size (default 0.02)")
-    p.add_argument("--lr-min",     type=float, default=0.003,
-                   help="Minimum LR for cosine decay schedule (default 0.003). "
+    p.add_argument("--lr",         type=float, default=0.01,
+                   help="PGD step size (default 0.01)")
+    p.add_argument("--lr-min",     type=float, default=0.001,
+                   help="Minimum LR for cosine decay schedule (default 0.001). "
                         "Set equal to --lr to disable decay.")
     p.add_argument("--eps",        type=float, default=1.0,
                    help="L-inf budget per pixel in [0,1] (default 1.0 = unconstrained)")
     p.add_argument("--topk",       type=int, default=TOP_K,
                    help="Top-k anchors used in loss (default 50)")
-    p.add_argument("--batch-size", type=int, default=8,
-                   help="Images averaged per PGD step for smoother gradients (default 8)")
+    p.add_argument("--batch-size", type=int, default=16,
+                   help="Images averaged per PGD step for smoother gradients (default 16)")
     p.add_argument("--no-eot",     action="store_true",
                    help="Disable EOT augmentation during training")
     p.add_argument("--geo-warmup", type=float, default=0.25,
@@ -171,6 +187,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--letter-weight", type=float, default=0.2,
                    help="Weight for letter shape loss (default 0.2). Increase toward 0.5 for"
                         " a clearer letter at the cost of slightly weaker adversarial effect.")
+    p.add_argument("--dual-patch", action="store_true",
+                   help="Train a torso patch jointly with the leg patch. Both are composited "
+                        "onto the host in a single forward pass and updated together via PGD.")
+    p.add_argument("--torso-out", default=None,
+                   help="Output PNG path for the torso patch (default: <out>_torso.png).")
     return p.parse_args()
 
 
@@ -185,6 +206,20 @@ def content_loss(patch: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     while the adversarial loss drives its function.
     """
     return torch.nn.functional.mse_loss(patch, target)
+
+
+# ---------------------------------------------------------------------------
+# Training log helper
+# ---------------------------------------------------------------------------
+
+_log_fh = None  # file handle opened by main() if --log-file is set
+
+def _log(msg: str) -> None:
+    """Print to stdout and optionally write to the log file, flushing immediately."""
+    print(msg, flush=True)
+    if _log_fh is not None:
+        _log_fh.write(msg + "\n")
+        _log_fh.flush()
 
 
 # ---------------------------------------------------------------------------
@@ -429,6 +464,68 @@ def _softmax_weights(arr: np.ndarray, temp: float) -> list:
 
 
 # ---------------------------------------------------------------------------
+# Startup cache — avoids redundant YOLO / pose inference on unchanged hosts
+# ---------------------------------------------------------------------------
+
+CACHE_DIR = PROJECT_ROOT / ".cache"
+
+
+def _host_cache_key(hosts_dir: str, single_host: str | None, model_path: str) -> str:
+    """
+    Compute a hex digest that changes when the host image set or model changes.
+    Uses file paths + sizes + mtimes (fast, no full-content hashing).
+    """
+    h = hashlib.sha256()
+    h.update(model_path.encode())
+    h.update(str(Path(model_path).stat().st_size).encode())
+
+    if single_host:
+        p = Path(single_host)
+        h.update(str(p).encode())
+        h.update(f"{p.stat().st_size}:{p.stat().st_mtime_ns}".encode())
+    else:
+        d = Path(hosts_dir)
+        if d.exists():
+            for p in sorted(d.iterdir()):
+                if p.suffix.lower() in SUPPORTED_EXTS and not p.name.startswith("._"):
+                    h.update(str(p).encode())
+                    h.update(f"{p.stat().st_size}:{p.stat().st_mtime_ns}".encode())
+    return h.hexdigest()[:16]
+
+
+def _load_startup_cache(cache_key: str) -> dict | None:
+    """Load cached baseline detections + pose keypoints, or None if stale/missing."""
+    cache_file = CACHE_DIR / f"startup_{cache_key}.pt"
+    if not cache_file.exists():
+        return None
+    try:
+        data = torch.load(cache_file, map_location="cpu", weights_only=False)
+        if data.get("version") != 2:
+            return None
+        return data
+    except Exception:
+        return None
+
+
+def _save_startup_cache(
+    cache_key: str,
+    baseline_confs: list[float],
+    host_bboxes: list,
+    pose_keypoints: list,
+) -> None:
+    """Persist baseline detections + pose keypoints to disk."""
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    cache_file = CACHE_DIR / f"startup_{cache_key}.pt"
+    torch.save({
+        "version": 2,
+        "baseline_confs": baseline_confs,
+        "host_bboxes": host_bboxes,
+        "pose_keypoints": pose_keypoints,
+    }, cache_file)
+    print(f"[CACHE] Saved startup cache → {cache_file}")
+
+
+# ---------------------------------------------------------------------------
 # EOT transforms  (applied to composite TENSOR — numpy ops via detach/reattach)
 # ---------------------------------------------------------------------------
 
@@ -472,8 +569,15 @@ def eot_augment_tensor(composite: torch.Tensor) -> torch.Tensor:
     if k > 1:
         arr = cv2.GaussianBlur(arr, (k, k), 0)
 
-    # 4. Random scale (zoom) — simulates different viewing distances
-    sc = random.uniform(*EOT_SCALE_RANGE)
+    # 4. Random scale (zoom) — trimodal: 60% close / 25% medium / 15% far
+    # Each band uses log-uniform so sub-octaves get equal coverage.
+    _r = random.random()
+    if _r < EOT_FAR_VIEW_PROB:
+        sc = math.exp(random.uniform(math.log(EOT_SCALE_RANGE_FAR[0]), math.log(EOT_SCALE_RANGE_FAR[1])))
+    elif _r < EOT_FAR_VIEW_PROB + EOT_MED_VIEW_PROB:
+        sc = math.exp(random.uniform(math.log(EOT_SCALE_RANGE_MED[0]), math.log(EOT_SCALE_RANGE_MED[1])))
+    else:
+        sc = math.exp(random.uniform(math.log(EOT_SCALE_RANGE[0]), math.log(EOT_SCALE_RANGE[1])))
     new_w, new_h = max(1, int(w * sc)), max(1, int(h * sc))
     scaled = cv2.resize(arr, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
     if sc >= 1.0:
@@ -570,7 +674,7 @@ def _gaussian_kernel_2d(k: int, device: torch.device) -> torch.Tensor:
     return kernel.unsqueeze(0).unsqueeze(0).expand(3, 1, k, k).contiguous()
 
 
-def eot_augment_differentiable(composite: torch.Tensor, geo_prob: float = 1.0) -> torch.Tensor:
+def eot_augment_differentiable(composite: torch.Tensor, geo_prob: float = 1.0, allow_far_view: bool = True, allow_med_view: bool = True) -> torch.Tensor:
     """
     Fully differentiable EOT augmentation with curriculum support.
 
@@ -619,50 +723,118 @@ def eot_augment_differentiable(composite: torch.Tensor, geo_prob: float = 1.0) -
         kern = _gaussian_kernel_2d(k, device)
         t = torch.nn.functional.conv2d(t, kern, padding=k // 2, groups=3)
 
-    # ── Geometric (grid_sample — differentiable) ──────────────────────────
-    # 5. Combined affine (scale/rotation) and perspective as a single grid_sample
+    # ── Geometric (MPS-native — no grid_sample) ────────────────────────────
+    # 5. Scale + rotation + perspective using only F.interpolate, F.pad, and
+    #    per-row/column shifts.  All ops have MPS backward support.
     if random.random() < geo_prob:
-        sc        = random.uniform(*EOT_SCALE_RANGE)
-        angle_rad = math.radians(random.uniform(-EOT_ROT_RANGE, EOT_ROT_RANGE))
-        ca = math.cos(angle_rad) / sc
-        sa = math.sin(angle_rad) / sc
-        # Affine matrix (3x3)
-        affine = np.array([
-            [ca, -sa, 0.0],
-            [sa,  ca, 0.0],
-            [0.0, 0.0, 1.0]
-        ], dtype=np.float32)
-        # Perspective jitter
-        jx = EOT_PERSP_JITTER * W
-        jy = EOT_PERSP_JITTER * H
-        src_pts = np.float32([[0, 0], [W, 0], [W, H], [0, H]])
-        dst_pts = np.float32([
-            [random.uniform(0, jx),     random.uniform(0, jy)],
-            [random.uniform(W - jx, W), random.uniform(0, jy)],
-            [random.uniform(W - jx, W), random.uniform(H - jy, H)],
-            [random.uniform(0, jx),     random.uniform(H - jy, H)],
-        ])
-        persp = cv2.getPerspectiveTransform(src_pts, dst_pts)
-        # Compose affine and perspective (persp @ affine)
-        combined = np.matmul(persp, affine)
-        # Invert: grid_sample needs input coords for each output pixel
-        H_inv = np.linalg.inv(combined)
-        ys, xs = torch.meshgrid(
-            torch.arange(H, dtype=torch.float32, device=device),
-            torch.arange(W, dtype=torch.float32, device=device),
-            indexing='ij',
-        )
-        ones   = torch.ones(H * W, dtype=torch.float32, device=device)
-        coords = torch.stack([xs.reshape(-1), ys.reshape(-1), ones], dim=0)  # (3, N)
-        H_inv_t = torch.tensor(H_inv, dtype=torch.float32, device=device)
-        mapped  = H_inv_t @ coords                                           # (3, N)
-        w_hom   = mapped[2].clamp(min=1e-6)
-        gx = (mapped[0] / w_hom) / (W * 0.5) - 1.0
-        gy = (mapped[1] / w_hom) / (H * 0.5) - 1.0
-        combined_grid = torch.stack([gx, gy], dim=-1).reshape(1, H, W, 2)
-        t = torch.nn.functional.grid_sample(
-            t, combined_grid, mode='bilinear', padding_mode='zeros', align_corners=False
-        )
+        # Trimodal scale: 60% close / 25% medium / 15% far (log-uniform per band)
+        # Gated by shoulder width so small subjects aren't shrunk to sub-stride sizes:
+        #   far  (0.15–0.35×) requires shoulders ≥80px → tile ≥12px after scaling
+        #   med  (0.35–0.55×) requires shoulders ≥50px → tile ≥18px after scaling
+        _r = random.random()
+        if allow_far_view and _r < EOT_FAR_VIEW_PROB:
+            sc = math.exp(random.uniform(math.log(EOT_SCALE_RANGE_FAR[0]), math.log(EOT_SCALE_RANGE_FAR[1])))
+        elif allow_med_view and _r < EOT_FAR_VIEW_PROB + EOT_MED_VIEW_PROB:
+            sc = math.exp(random.uniform(math.log(EOT_SCALE_RANGE_MED[0]), math.log(EOT_SCALE_RANGE_MED[1])))
+        else:
+            sc = math.exp(random.uniform(math.log(EOT_SCALE_RANGE[0]), math.log(EOT_SCALE_RANGE[1])))
+
+        new_h = max(1, int(H * sc))
+        new_w = max(1, int(W * sc))
+
+        if sc >= 1.0:
+            # Zoom in — resize up then centre-crop back to (H, W)
+            t = torch.nn.functional.interpolate(t, size=(new_h, new_w), mode='bilinear', align_corners=False)
+            y0 = (new_h - H) // 2
+            x0 = (new_w - W) // 2
+            t = t[:, :, y0:y0 + H, x0:x0 + W]
+        else:
+            # Zoom out — resize down then pad to (H, W)
+            t = torch.nn.functional.interpolate(t, size=(new_h, new_w), mode='bilinear', align_corners=False)
+            pad_top = (H - new_h) // 2
+            pad_bot = H - new_h - pad_top
+            pad_left = (W - new_w) // 2
+            pad_right = W - new_w - pad_left
+            t = torch.nn.functional.pad(t, (pad_left, pad_right, pad_top, pad_bot), value=0.5)
+
+        # 5b. Rotation via vectorized horizontal shear (MPS-native)
+        # Uses gather-based sub-pixel shifting — no Python row loops.
+        # Single shear approximation: for ±20° the error vs true rotation
+        # is <2% and the patch learns to handle the residual.
+        angle_deg = random.uniform(-EOT_ROT_RANGE, EOT_ROT_RANGE)
+        if abs(angle_deg) > 0.5:
+            angle_rad = math.radians(angle_deg)
+            _cur_h, _cur_w = t.shape[2], t.shape[3]
+            shx = math.tan(angle_rad)  # horizontal displacement per row
+            # Per-row fractional shift
+            row_shifts = (torch.arange(_cur_h, device=device, dtype=torch.float32) - _cur_h / 2.0) * shx
+            # Build source x-indices for each (row, col): src_col = col - shift[row]
+            col_idx = torch.arange(_cur_w, device=device, dtype=torch.float32).unsqueeze(0)  # (1, W)
+            src_x = col_idx - row_shifts.unsqueeze(1)  # (H, W)
+            # Bilinear: blend floor and ceil
+            src_x0 = src_x.long()
+            frac = (src_x - src_x0.float()).unsqueeze(0).unsqueeze(0)  # (1,1,H,W)
+            # Clamp indices to valid range (out-of-bounds → edge pixel, masked by frac weighting)
+            idx0 = src_x0.clamp(0, _cur_w - 1).unsqueeze(0).expand(1, 3, _cur_h, _cur_w)  # (1,3,H,W)
+            idx1 = (src_x0 + 1).clamp(0, _cur_w - 1).unsqueeze(0).expand(1, 3, _cur_h, _cur_w)
+            val0 = torch.gather(t, 3, idx0)
+            val1 = torch.gather(t, 3, idx1)
+            t = val0 * (1 - frac) + val1 * frac
+            # Zero out pixels that came from out-of-bounds
+            valid = (src_x >= 0) & (src_x < _cur_w - 1)  # (H, W)
+            t = t * valid.unsqueeze(0).unsqueeze(0).float()
+
+        # 5c. Perspective via vectorized resampling (MPS-native)
+        # Two independent axes — vertical trapezoid (looking up/down) and
+        # horizontal trapezoid (looking from the side, quilt wrapping around body).
+        # Each uses gather-based sub-pixel column/row resampling.
+
+        # Vertical perspective: per-row horizontal scaling
+        persp_v = random.uniform(-EOT_PERSP_JITTER, EOT_PERSP_JITTER)
+        if abs(persp_v) > 0.02:
+            _cur_h, _cur_w = t.shape[2], t.shape[3]
+            row_scales = torch.linspace(1.0 + persp_v, 1.0 - persp_v, _cur_h, device=device)
+            centre_x = _cur_w / 2.0
+            col_idx = torch.arange(_cur_w, device=device, dtype=torch.float32).unsqueeze(0)
+            src_x = centre_x + (col_idx - centre_x) / row_scales.unsqueeze(1)
+            src_x0 = src_x.long()
+            frac = (src_x - src_x0.float()).unsqueeze(0).unsqueeze(0)
+            idx0 = src_x0.clamp(0, _cur_w - 1).unsqueeze(0).expand(1, 3, _cur_h, _cur_w)
+            idx1 = (src_x0 + 1).clamp(0, _cur_w - 1).unsqueeze(0).expand(1, 3, _cur_h, _cur_w)
+            val0 = torch.gather(t, 3, idx0)
+            val1 = torch.gather(t, 3, idx1)
+            t = val0 * (1 - frac) + val1 * frac
+            valid = (src_x >= 0) & (src_x < _cur_w - 1)
+            t = t * valid.unsqueeze(0).unsqueeze(0).float() + \
+                0.5 * (~valid).unsqueeze(0).unsqueeze(0).float()
+
+        # Horizontal perspective: per-column vertical scaling
+        # Simulates viewing the quilt from the side — one edge closer than the other
+        persp_h = random.uniform(-EOT_PERSP_JITTER, EOT_PERSP_JITTER)
+        if abs(persp_h) > 0.02:
+            _cur_h, _cur_w = t.shape[2], t.shape[3]
+            col_scales = torch.linspace(1.0 + persp_h, 1.0 - persp_h, _cur_w, device=device)
+            centre_y = _cur_h / 2.0
+            row_idx = torch.arange(_cur_h, device=device, dtype=torch.float32).unsqueeze(1)
+            src_y = centre_y + (row_idx - centre_y) / col_scales.unsqueeze(0)
+            src_y0 = src_y.long()
+            frac = (src_y - src_y0.float()).unsqueeze(0).unsqueeze(0)
+            idx0 = src_y0.clamp(0, _cur_h - 1).unsqueeze(0).expand(1, 3, _cur_h, _cur_w)
+            idx1 = (src_y0 + 1).clamp(0, _cur_h - 1).unsqueeze(0).expand(1, 3, _cur_h, _cur_w)
+            val0 = torch.gather(t, 2, idx0)
+            val1 = torch.gather(t, 2, idx1)
+            t = val0 * (1 - frac) + val1 * frac
+            valid = (src_y >= 0) & (src_y < _cur_h - 1)
+            t = t * valid.unsqueeze(0).unsqueeze(0).float() + \
+                0.5 * (~valid).unsqueeze(0).unsqueeze(0).float()
+
+        # 5d. Random translation (off-centre framing)
+        max_tx = int(EOT_PERSP_JITTER * W * 0.3)
+        max_ty = int(EOT_PERSP_JITTER * H * 0.3)
+        if max_tx > 0 and max_ty > 0:
+            tx = random.randint(-max_tx, max_tx)
+            ty = random.randint(-max_ty, max_ty)
+            t = torch.roll(t, shifts=(ty, tx), dims=(2, 3))
 
     # ── Noise & shadow ────────────────────────────────────────────────────
     # 7. Random shadow strip (tensor mask — differentiable)
@@ -684,19 +856,17 @@ def eot_augment_differentiable(composite: torch.Tensor, geo_prob: float = 1.0) -
         noise_std = random.uniform(0, EOT_PRINT_NOISE / 255.0)
         t = torch.clamp(t + torch.randn_like(t) * noise_std, 0.0, 1.0)
 
-    # 9. JPEG simulation (pure-tensor blocky quantization approximation)
-    #    Simulates block artifacts and quantization without CPU/GPU transfer.
-    block_size = random.choice([8, 16])
-    quant_levels = random.randint(8, 32)
-    t_blocky = t.clone()
-    _, _, H, W = t_blocky.shape
-    for y in range(0, H, block_size):
-        for x in range(0, W, block_size):
-            block = t_blocky[:, :, y:y+block_size, x:x+block_size]
-            block_mean = block.mean(dim=[2,3], keepdim=True)
-            block_quant = torch.round(block_mean * quant_levels) / quant_levels
-            t_blocky[:, :, y:y+block_size, x:x+block_size] = block_quant
-    t = t_blocky.detach() + (t - t.detach())  # STE: forward=blocky, backward=clean
+    # 9. JPEG simulation via real OpenCV encode/decode + straight-through estimator.
+    #    Forward pass sees genuine JPEG block artifacts; backward flows through the
+    #    clean tensor so gradients reach patch pixels unobstructed.
+    quality = random.randint(EOT_JPEG_QUALITY[0], EOT_JPEG_QUALITY[1])
+    with torch.no_grad():
+        _arr = (t.squeeze(0).permute(1, 2, 0).cpu().numpy() * 255.0).clip(0, 255).astype(np.uint8)
+        _arr_bgr = cv2.cvtColor(_arr, cv2.COLOR_RGB2BGR)
+        _, _enc = cv2.imencode(".jpg", _arr_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
+        _arr_dec = cv2.cvtColor(cv2.imdecode(_enc, cv2.IMREAD_COLOR), cv2.COLOR_BGR2RGB)
+        t_jpeg = torch.from_numpy(_arr_dec.astype(np.float32) / 255.0).permute(2, 0, 1).unsqueeze(0).to(t.device)
+    t = t_jpeg.detach() + (t - t.detach())  # STE: forward=JPEG, backward=clean
 
     return t
 
@@ -1018,6 +1188,78 @@ def make_leg_mask(
     return mask.astype(np.float32)
 
 
+def wrinkle_deform(patch_t: torch.Tensor, strength: float = EOT_WRINKLE_STRENGTH) -> torch.Tensor:
+    """
+    Apply a random smooth displacement to the patch tensor, simulating cloth
+    wrinkles / fabric deformation.  MPS-native — uses per-row circular shifts
+    with smooth interpolation instead of grid_sample.
+
+    A smooth horizontal displacement curve (low-freq sinusoid + noise) shifts
+    each row independently, simulating vertical wrinkle lines on fabric.
+    Alternates between horizontal and vertical wrinkle orientation randomly.
+
+    Parameters
+    ----------
+    patch_t : (1, 3, H, W) float32 tensor
+    strength : max displacement as a fraction of H/W (default 0.08)
+
+    Returns
+    -------
+    Warped patch tensor with same shape, gradients flow back to patch_t.
+    """
+    _, _, H, W = patch_t.shape
+    if H < 4 or W < 4:
+        return patch_t
+    device = patch_t.device
+
+    # Generate smooth per-row displacement via low-freq random signal
+    # 4 control points → interpolate to H rows → smooth wrinkle-like shifts
+    n_ctrl = 4
+    ctrl = (torch.rand(n_ctrl, device=device) * 2 - 1) * strength
+    # Interpolate to full resolution
+    ctrl_up = torch.nn.functional.interpolate(
+        ctrl.view(1, 1, 1, n_ctrl), size=(1, H), mode='bilinear', align_corners=False
+    ).view(H)  # (H,) smooth displacement in fraction-of-width
+
+    # Convert to pixel shifts
+    shifts_px = ctrl_up * W  # (H,) float pixel shifts per row
+
+    # Apply sub-pixel horizontal shift per row via weighted blend of two integer rolls
+    shifts_int = shifts_px.long()
+    shifts_frac = (shifts_px - shifts_int.float()).view(1, 1, H, 1)  # (1,1,H,1)
+
+    # Roll each row — use two integer neighbours for sub-pixel blending
+    # This is differentiable w.r.t. patch_t (linear blend), not w.r.t. shifts (constant)
+    out = torch.zeros_like(patch_t)
+    for r in range(H):
+        s = int(shifts_int[r].item())
+        f = shifts_frac[0, 0, r, 0]
+        rolled_0 = torch.roll(patch_t[:, :, r, :], shifts=s, dims=-1)
+        rolled_1 = torch.roll(patch_t[:, :, r, :], shifts=s + 1, dims=-1)
+        out[:, :, r, :] = rolled_0 * (1 - f) + rolled_1 * f
+
+    # 50% chance: apply vertically instead (transpose → shift → transpose back)
+    if random.random() < 0.5:
+        # Redo with column shifts instead
+        ctrl2 = (torch.rand(n_ctrl, device=device) * 2 - 1) * strength
+        ctrl_up2 = torch.nn.functional.interpolate(
+            ctrl2.view(1, 1, 1, n_ctrl), size=(1, W), mode='bilinear', align_corners=False
+        ).view(W)
+        shifts_px2 = ctrl_up2 * H
+        shifts_int2 = shifts_px2.long()
+        shifts_frac2 = (shifts_px2 - shifts_int2.float()).view(1, 1, 1, W)
+        out2 = torch.zeros_like(out)
+        for c in range(W):
+            s = int(shifts_int2[c].item())
+            f = shifts_frac2[0, 0, 0, c]
+            rolled_0 = torch.roll(out[:, :, :, c], shifts=s, dims=-1)
+            rolled_1 = torch.roll(out[:, :, :, c], shifts=s + 1, dims=-1)
+            out2[:, :, :, c] = rolled_0 * (1 - f) + rolled_1 * f
+        return out2
+
+    return out
+
+
 def composite_leg_patch(
     host_t: torch.Tensor,        # (1, 3, H, W) float32 [0,1]
     patch: torch.Tensor,         # (1, 3, N, N) float32 [0,1]  requires_grad
@@ -1026,6 +1268,7 @@ def composite_leg_patch(
     img_h: int,
     img_w: int,
     width_frac: float = 0.25,
+    geo_prob: float = 1.0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Composite the square patch onto host_t inside the rotated 1:4 leg rectangle.
@@ -1044,9 +1287,14 @@ def composite_leg_patch(
     rect_h = max(4, int(leg_length))
     rect_w = max(4, int(leg_length * width_frac))
 
+    # --- optional cloth-wrinkle deformation (before resize) ------------------
+    _p = patch
+    if random.random() < EOT_WRINKLE_PROB * geo_prob:
+        _p = wrinkle_deform(_p)
+
     # --- differentiable patch resize -----------------------------------------
     patch_resized = torch.nn.functional.interpolate(
-        patch, size=(rect_h, rect_w), mode="bilinear", align_corners=False
+        _p, size=(rect_h, rect_w), mode="bilinear", align_corners=False
     )  # (1, 3, rect_h, rect_w)
 
     # --- build mask and placement canvas (numpy, no grad) --------------------
@@ -1056,18 +1304,133 @@ def composite_leg_patch(
     # Axis-aligned bounding box of the rotated rectangle — used to place the
     # resized patch onto the canvas before masking clips it to the true shape.
     center = (hip + ankle) / 2
-    row = int(center[1]) - rect_h // 2
-    col = int(center[0]) - rect_w // 2
+    # Positional jitter: ±5% of leg length to prevent anchor-grid overfitting
+    jitter_px = leg_length * EOT_POS_JITTER
+    row = int(center[1] + random.uniform(-jitter_px, jitter_px)) - rect_h // 2
+    col = int(center[0] + random.uniform(-jitter_px, jitter_px)) - rect_w // 2
     row = max(0, min(row, img_h - rect_h))
     col = max(0, min(col, img_w - rect_w))
 
-    # Canvas: start from host, paint patch into the AABB; mask clips the shape.
-    canvas = host_t.clone()
+    # Canvas: zero tensor with patch placed at AABB location — no in-place ops
+    # so gradients can flow back through patch_resized to patch.
     ph = min(rect_h, img_h - row)
     pw = min(rect_w, img_w - col)
-    canvas[:, :, row:row + ph, col:col + pw] = patch_resized[:, :, :ph, :pw]
+    patch_canvas = torch.zeros_like(host_t)
+    # Use narrow + copy_ only on the patch_canvas (leaf-free), keeping graph intact
+    # Build via addition of a padded patch tensor instead of in-place slice assignment
+    pad_top    = row
+    pad_bottom = img_h - row - ph
+    pad_left   = col
+    pad_right  = img_w - col - pw
+    patch_placed = torch.nn.functional.pad(
+        patch_resized[:, :, :ph, :pw],
+        (pad_left, pad_right, pad_top, pad_bottom)
+    )  # (1, 3, H, W) — fully differentiable
 
-    composite = host_t * (1.0 - mask_t) + canvas * mask_t
+    composite = host_t * (1.0 - mask_t) + patch_placed * mask_t
+    return composite, mask_t
+
+
+def composite_torso_patch(
+    host_t: torch.Tensor,       # (1, 3, H, W) float32 [0,1]
+    patch_torso: torch.Tensor,  # (1, 3, N, N) float32 [0,1]  requires_grad
+    kpts: np.ndarray,           # (17, 3) x, y, conf
+    img_h: int,
+    img_w: int,
+    geo_prob: float = 1.0,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Tile identical square patches in a 2D quilt over the torso (shoulder → hip),
+    with random horizontal and vertical offset to simulate the quilt not being
+    perfectly centred.  Wrapping ensures partial tiles are filled from the
+    opposite edge of the pattern — like sliding a window over an infinite
+    repeating quilt.
+
+    Each tile is shoulder-width × shoulder-width.  The grid covers the full
+    torso rectangle (shoulder-to-shoulder horizontally, shoulders-to-hips
+    vertically).  A random x-offset in [0, side) shifts the grid each step
+    so the patch learns to work at every possible seam alignment.
+
+    Keypoint indices (COCO-17):
+        5 = left shoulder,  6  = right shoulder
+        11 = left hip,      12 = right hip
+
+    Returns (composite, mask_t) where mask_t is (1,1,H,W).
+    """
+    ls_x, ls_y = float(kpts[5][0]),  float(kpts[5][1])
+    rs_x, rs_y = float(kpts[6][0]),  float(kpts[6][1])
+    lh_x, lh_y = float(kpts[11][0]), float(kpts[11][1])
+    rh_x, rh_y = float(kpts[12][0]), float(kpts[12][1])
+
+    # Tile dimensions: square, side = shoulder-to-shoulder width
+    sw = max(ls_x, rs_x) - min(ls_x, rs_x)
+    side = max(4, int(sw))
+
+    # Expand torso box 20% beyond shoulders on each side so the quilt
+    # covers the full upper-body width (sleeves / sides of garment).
+    margin = sw * 0.20
+
+    # Torso bounding box — no positional jitter needed here because the
+    # quilt tile offset (torch.roll) already provides full anchor-grid coverage.
+    torso_x1 = int(max(0,     min(ls_x, rs_x) - margin))
+    torso_x2 = int(min(img_w, max(ls_x, rs_x) + margin))
+    torso_y1 = int(max(0,     min(ls_y, rs_y)))
+    torso_y2 = int(min(img_h, max(lh_y, rh_y)))
+
+    torso_w = torso_x2 - torso_x1
+    torso_h = torso_y2 - torso_y1
+    # Skip if torso is too small — noisy keypoints on far-away or extreme
+    # side-angle people produce bad gradients.  30px shoulder width is the
+    # minimum for a tile that can carry meaningful adversarial features,
+    # especially after EOT scaling (0.20x far → 6px, marginal but acceptable).
+    if sw < 30 or torso_w < 30 or torso_h < 30:
+        return host_t, torch.zeros(1, 1, img_h, img_w, device=host_t.device)
+
+    # Resize the canonical patch to one tile at full side × side
+    tile_full = torch.nn.functional.interpolate(
+        patch_torso, size=(side, side), mode="bilinear", align_corners=False
+    )  # (1, 3, side, side)
+
+    # Random horizontal and vertical offset: simulates quilt not being centred.
+    # The offset is in [0, side) — wrapping fills partial tiles from the
+    # opposite edge of the pattern like an infinite repeating quilt.
+    x_offset = random.randint(0, side - 1)
+    y_offset = random.randint(0, side - 1)
+
+    # Build a tiled texture that covers the full torso rectangle.
+    # We create a texture buffer slightly larger than torso, tile into it,
+    # then crop to exact torso size.
+    n_tiles_x = (torso_w + side - 1) // side + 1  # +1 for partial offset tile
+    n_tiles_y = (torso_h + side - 1) // side + 1
+    buf_w = n_tiles_x * side
+    buf_h = n_tiles_y * side
+
+    # Tile by repeating the full-size tile across the buffer
+    row_strip = tile_full.expand(1, 3, side, side).repeat(1, 1, 1, n_tiles_x)  # (1,3,side,buf_w)
+    tiled = row_strip.repeat(1, 1, n_tiles_y, 1)  # (1, 3, buf_h, buf_w)
+
+    # Apply offset (circular shift) then crop to torso dimensions
+    tiled = torch.roll(tiled, shifts=(-y_offset, -x_offset), dims=(2, 3))
+    tiled_cropped = tiled[:, :, :torso_h, :torso_w]  # (1, 3, torso_h, torso_w)
+
+    # Optional cloth-wrinkle deformation applied to the assembled quilt so
+    # wrinkles span across tile boundaries naturally, like real fabric.
+    # Guarded by geo_prob to respect the geometric curriculum (grid_sample
+    # backward is not implemented on MPS).
+    if random.random() < EOT_WRINKLE_PROB * geo_prob:
+        tiled_cropped = wrinkle_deform(tiled_cropped)
+
+    # Pad cropped tile texture to full image size
+    patch_placed = torch.nn.functional.pad(
+        tiled_cropped,
+        (torso_x1, img_w - torso_x2, torso_y1, img_h - torso_y2)
+    )  # (1, 3, H, W)
+
+    mask_np = np.zeros((img_h, img_w), dtype=np.float32)
+    mask_np[torso_y1:torso_y2, torso_x1:torso_x2] = 1.0
+    mask_t = torch.from_numpy(mask_np).to(host_t.device).unsqueeze(0).unsqueeze(0)
+
+    composite = host_t * (1.0 - mask_t) + patch_placed * mask_t
     return composite, mask_t
 
 
@@ -1082,7 +1445,6 @@ def save_eval_samples(
     out_dir: Path,
     yolo_wrapper,
     n_samples: int = 5,
-    width_frac: float = 0.25,
 ) -> None:
     """
     Save n_samples annotated images showing:
@@ -1113,24 +1475,20 @@ def save_eval_samples(
             pre_ann = (*pre_boxes.xyxy.cpu()[best_j].numpy().astype(int),
                        float(pre_boxes.conf.cpu()[best_j]))
 
-        # --- Composite patch onto the CLEAN host -------------------------
+        # --- Composite patch onto the CLEAN host (torso quilt) -----------
         kpts_list = pose_keypoints[idx] if idx < len(pose_keypoints) else []
-        hip_px = ankle_px = None
+        comp_ready = False
         if len(kpts_list) > 0:
             person_kpts = kpts_list[0]
-            x_hip, y_hip, c_hip = person_kpts[12]
-            x_ankle, y_ankle, c_ankle = person_kpts[16]
-            if c_hip >= 0.3 and c_ankle >= 0.3:
-                hip_px = np.array([x_hip, y_hip], dtype=np.float32)
-                ankle_px = np.array([x_ankle, y_ankle], dtype=np.float32)
+            if person_kpts[5][2] >= 0.3 and person_kpts[6][2] >= 0.3 and person_kpts[11][2] >= 0.3:
+                host_t = preprocess(orig_bgr)
+                with torch.no_grad():
+                    comp_t, _ = composite_torso_patch(
+                        host_t, patch_t.cpu(), person_kpts, img_h, img_w
+                    )
+                comp_ready = True
 
-        if hip_px is not None:
-            host_t = preprocess(orig_bgr)
-            with torch.no_grad():
-                comp_t, _ = composite_leg_patch(
-                    host_t, patch_t.cpu(), hip_px, ankle_px, img_h, img_w, width_frac
-                )
-            # img now contains the actual patch pixels blended onto the host
+        if comp_ready:
             img = cv2.cvtColor(
                 (comp_t.squeeze(0).permute(1, 2, 0).numpy() * 255).astype(np.uint8),
                 cv2.COLOR_RGB2BGR
@@ -1205,7 +1563,6 @@ def save_saliency_maps(
     torch_model: torch.nn.Module,
     out_dir: Path,
     n_samples: int = 3,
-    width_frac: float = 0.25,
 ) -> None:
     """
     For n_samples random hosts save side-by-side images:
@@ -1235,29 +1592,26 @@ def save_saliency_maps(
         cv2.putText(left, "PRE-PATCH SALIENCY", (6, 22), font, 0.65, (255, 255, 255), 2, cv2.LINE_AA)
         cv2.putText(left, "PRE-PATCH SALIENCY", (6, 22), font, 0.65, (0, 0, 0), 1, cv2.LINE_AA)
 
-        # --- Post-patch saliency -----------------------------------------
+        # --- Post-patch saliency (torso quilt) ---------------------------
         kpts_list = pose_keypoints[idx] if idx < len(pose_keypoints) else []
-        hip_px = ankle_px = None
+        comp_ready = False
         if len(kpts_list) > 0:
             pk = kpts_list[0]
-            x_hip, y_hip, c_hip = pk[12]
-            x_ankle, y_ankle, c_ankle = pk[16]
-            if c_hip >= 0.3 and c_ankle >= 0.3:
-                hip_px = np.array([x_hip, y_hip], dtype=np.float32)
-                ankle_px = np.array([x_ankle, y_ankle], dtype=np.float32)
+            if pk[5][2] >= 0.3 and pk[6][2] >= 0.3 and pk[11][2] >= 0.3:
+                with torch.no_grad():
+                    comp_t, mask_t = composite_torso_patch(
+                        host_t, patch_t.cpu(), pk, img_h, img_w
+                    )
+                comp_ready = True
 
-        if hip_px is not None:
-            with torch.no_grad():
-                comp_t, _ = composite_leg_patch(
-                    host_t, patch_t.cpu(), hip_px, ankle_px, img_h, img_w, width_frac
-                )
+        if comp_ready:
             sal_post = _compute_saliency(comp_t, torch_model)
             comp_bgr = cv2.cvtColor(
                 (comp_t.squeeze(0).permute(1, 2, 0).numpy() * 255).astype(np.uint8),
                 cv2.COLOR_RGB2BGR
             )
-            # Draw leg outline on right panel
-            mask_np = make_leg_mask(hip_px, ankle_px, img_h, img_w, width_frac)
+            # Draw torso outline on right panel
+            mask_np = mask_t.squeeze().numpy()
             contours, _ = cv2.findContours(
                 mask_np.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
             )
@@ -1331,7 +1685,10 @@ def clean_eval_confidence(
 # ---------------------------------------------------------------------------
 
 def main() -> None:
+    global _log_fh
     args = parse_args()
+    if args.log_file:
+        _log_fh = open(args.log_file, "w", buffering=1)  # line-buffered
     random.seed(args.seed)
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
@@ -1340,7 +1697,13 @@ def main() -> None:
     # LEG PATCH PIPELINE ONLY
     # Remove all non-leg-patch logic and variables
     patch_size = args.patch_size
-    out_path   = Path(args.out) if args.out else PROJECT_ROOT / "patterns" / f"patch_{patch_size}_{args.init}.png"
+    # Always resolve out_path to an absolute path anchored at PROJECT_ROOT so that
+    # the checkpoint path (derived from out_path) is stable regardless of CWD.
+    if args.out:
+        _op = Path(args.out)
+        out_path = _op if _op.is_absolute() else PROJECT_ROOT / _op
+    else:
+        out_path = PROJECT_ROOT / "patterns" / f"patch_{patch_size}_{args.init}.png"
     device = torch.device(
         "cuda" if torch.cuda.is_available()
         else "mps" if torch.backends.mps.is_available()
@@ -1373,19 +1736,41 @@ def main() -> None:
     # 4. Initialise patch (or resume from checkpoint)
     ckpt_path  = out_path.parent / (out_path.stem + "_ckpt.pt")
     start_step = 0
-    best_loss  = float("inf")
+    best_loss     = float("inf")
+    best_obj_loss = float("inf")   # adversarial objective only (no NPS/TV)
+    best_mean_conf = float("inf")  # best cross-dataset eval confidence (lower = better)
     patch = init_patch(args.init, patch_size, device)
     patch.requires_grad_(True)
     best_patch = patch.detach().clone()
-    # No hat patch, no style/letter/printable colors, no bbox/torso logic
 
-    if args.resume and ckpt_path.exists():
-        ckpt = torch.load(ckpt_path, map_location=device)
-        patch      = ckpt["patch"].to(device).requires_grad_(True)
-        start_step = ckpt["step"]
-        best_loss  = ckpt["best_loss"]
-        best_patch = ckpt["best_patch"].to(device)
-        print(f"[INFO] Resumed from checkpoint  step={start_step}  best_loss={best_loss:.6f}")
+    # Dual-patch: torso patch trained jointly with leg patch
+    patch_torso: torch.Tensor | None = None
+    best_patch_torso: torch.Tensor | None = None
+    if args.dual_patch:
+        patch_torso = init_patch(args.init, patch_size, device)
+        patch_torso.requires_grad_(True)
+        best_patch_torso = patch_torso.detach().clone()
+        print(f"[INFO] Dual-patch mode ON — torso patch ({patch_size}×{patch_size}) trained jointly")
+
+    if args.resume:
+        print(f"[INFO] Resume requested — looking for checkpoint: {ckpt_path}")
+        if not ckpt_path.exists():
+            print(f"[WARN] No checkpoint found at {ckpt_path}. Starting fresh.")
+        else:
+            try:
+                ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
+                patch      = ckpt["patch"].to(device).requires_grad_(True)
+                start_step = ckpt["step"]
+                best_loss  = ckpt["best_loss"]
+                best_patch = ckpt["best_patch"].to(device)
+                best_mean_conf = ckpt.get("best_mean_conf", float("inf"))
+                if args.dual_patch and "patch_torso" in ckpt:
+                    patch_torso      = ckpt["patch_torso"].to(device).requires_grad_(True)
+                    best_patch_torso = ckpt.get("best_patch_torso", patch_torso.detach().clone()).to(device)
+                    print(f"[INFO] Resumed torso patch from checkpoint")
+                print(f"[INFO] Resumed from checkpoint  step={start_step}  best_loss={best_loss:.6f}  best_mean_conf={best_mean_conf:.4f}")
+            except Exception as e:
+                print(f"[WARN] Failed to load checkpoint ({e}). Starting fresh.")
 
     # Hat/crown patch — separate tensor, same size as torso patch.
     # Stored and updated independently so gradients are clean.
@@ -1394,24 +1779,60 @@ def main() -> None:
     # Hat patch forcibly disabled; do not allocate
 
     # ------------------------------------------------------------------
-    # 5. Baseline: average max-confidence person detection, all hosts, no patch
+    # 5. Baseline detections + pose keypoints (cached across runs)
     # ------------------------------------------------------------------
-    print(f"[INFO] Computing clean baseline confidence ({len(host_pool_bgr)} hosts, no patch) …")
-    clean_baseline = 0.0
-    baseline_anchor_boxes = []
-    print(f"[INFO] Clean baseline mean confidence : {clean_baseline:.6f}")
+    _cache_key = _host_cache_key(args.hosts_dir, args.host, args.model)
+    _cached = _load_startup_cache(_cache_key)
 
-    # ------------------------------------------------------------------
-    # 5b. Pre-extract pose keypoints for all host images (once, before loop)
-    # ------------------------------------------------------------------
-    print("[INFO] Extracting pose keypoints from host images …")
-    pose_model = YOLO("yolov8n-pose.pt")
-    pose_keypoints: list = []
-    for h_bgr in host_pool_bgr:
-        results = pose_model(h_bgr, verbose=False)
-        kpts = results[0].keypoints.data.cpu().numpy() if results[0].keypoints is not None else []
-        pose_keypoints.append(kpts)
-    print(f"[INFO] Pose extraction done  ({len(pose_keypoints)} images)")
+    if _cached is not None and len(_cached["pose_keypoints"]) == len(host_pool_bgr):
+        print(f"[CACHE] Hit — reusing baseline detections + pose keypoints")
+        baseline_confs = _cached["baseline_confs"]
+        host_bboxes    = _cached["host_bboxes"]
+        pose_keypoints = _cached["pose_keypoints"]
+    else:
+        if _cached is not None:
+            print(f"[CACHE] Stale (host count changed) — recomputing")
+        else:
+            print(f"[CACHE] Miss — computing baseline + pose from scratch")
+
+        # 5a. Baseline: average max-confidence person detection, all hosts, no patch
+        print(f"[INFO] Computing clean baseline confidence ({len(host_pool_bgr)} hosts, no patch) …")
+        baseline_confs = []
+        host_bboxes: list = []  # cached person bbox per host for IoU-guided loss
+        for _h_bgr in host_pool_bgr:
+            with torch.no_grad():
+                _res = yolo.predict(source=_h_bgr, conf=0.01, classes=[PERSON_CLASS], verbose=False)
+            _boxes = _res[0].boxes
+            if _boxes is not None and len(_boxes) > 0:
+                baseline_confs.append(float(_boxes.conf.cpu().max()))
+                _best_box_idx = int(_boxes.conf.cpu().argmax())
+                _xyxy = _boxes.xyxy[_best_box_idx].cpu().numpy()
+                host_bboxes.append((int(_xyxy[0]), int(_xyxy[1]), int(_xyxy[2]), int(_xyxy[3])))
+            else:
+                host_bboxes.append(None)
+
+        # 5b. Pre-extract pose keypoints for all host images
+        print("[INFO] Extracting pose keypoints from host images …")
+        pose_model = YOLO("yolov8n-pose.pt")
+        pose_keypoints: list = []
+        for h_bgr in host_pool_bgr:
+            results = pose_model(h_bgr, verbose=False)
+            kpts = results[0].keypoints.data.cpu().numpy() if results[0].keypoints is not None else []
+            pose_keypoints.append(kpts)
+        print(f"[INFO] Pose extraction done  ({len(pose_keypoints)} images)")
+        del pose_model  # free memory
+
+        _save_startup_cache(_cache_key, baseline_confs, host_bboxes, pose_keypoints)
+
+    clean_baseline = float(np.mean(baseline_confs)) if baseline_confs else 0.0
+    print(f"[INFO] Clean baseline mean confidence : {clean_baseline:.6f}  ({len(baseline_confs)}/{len(host_pool_bgr)} hosts detected)")
+    torch_model.eval().to(device)  # yolo.predict() may move model to CPU; restore
+    yolo.overrides["device"] = str(device)
+
+    # Pre-compute anchor grid once — constant for all steps
+    anchor_centers_t = generate_anchor_centers(IMG_SIZE, device=device) if args.iou_loss else None
+    if anchor_centers_t is not None:
+        print(f"[INFO] IoU-guided loss enabled — anchor grid: {anchor_centers_t.shape}")
 
     # ------------------------------------------------------------------
     # 6. PGD loop with EOT augmentation + multi-host + leg-patch placement
@@ -1419,9 +1840,12 @@ def main() -> None:
     for step in range(start_step + 1, args.steps + 1):
         if patch.grad is not None:
             patch.grad.zero_()
+        if patch_torso is not None and patch_torso.grad is not None:
+            patch_torso.grad.zero_()
 
         obj_losses = []
         attn_losses = []
+        _torso_updates = 0  # count how many batch samples got a torso composite this step
         prog = (step - 1) / max(args.steps - 1, 1)   # 0.0 → 1.0
 
         # Cosine LR decay
@@ -1453,24 +1877,31 @@ def main() -> None:
             if len(kpts_arr) == 0:
                 continue
             person_kpts = kpts_arr[0]  # first detected person
-            x_hip,    y_hip,    conf_hip    = person_kpts[12]
-            x_ankle,  y_ankle,  conf_ankle  = person_kpts[16]
-            if conf_hip < 0.3 or conf_ankle < 0.3:
-                continue
 
-            hip_px    = np.array([float(x_hip),   float(y_hip)],   dtype=np.float32)
-            ankle_px  = np.array([float(x_ankle), float(y_ankle)], dtype=np.float32)
-
-            # (c) Differentiable composite: square patch → rotated 1:4 rectangle on host
+            # (c) Differentiable composite
             host_t = host_pool_t[idx]
-            composite, mask_t = composite_leg_patch(
-                host_t, patch, hip_px, ankle_px,
-                IMG_SIZE, IMG_SIZE, width_frac=0.25
+
+            # --- Torso mode: place patch on shoulder→hip region ---
+            _conf_ls = person_kpts[5][2]
+            _conf_rs = person_kpts[6][2]
+            _conf_lh = person_kpts[11][2]
+            if _conf_ls < 0.3 or _conf_rs < 0.3 or _conf_lh < 0.3:
+                continue
+            composite, mask_t = composite_torso_patch(
+                host_t, patch, person_kpts, IMG_SIZE, IMG_SIZE, geo_prob=geo_prob
             )
 
             # (d) EOT augmentation
+            # Far-view scale only when shoulder width >= 80px so the patch
+            # stays above ~16px after 0.20× scaling (meaningful gradient).
+            _sw = float(person_kpts[6][0]) - float(person_kpts[5][0])
+            _sw = abs(_sw)
+            # Tiered gate: medium band needs ≥50px shoulders (~8m),
+            # far band needs ≥80px (~5m) so tiles stay above stride-8 after scaling.
+            _allow_far = _sw >= 80.0
+            _allow_med = _sw >= 50.0
             if not args.no_eot:
-                composite_aug = eot_augment_differentiable(composite, geo_prob=geo_prob)
+                composite_aug = eot_augment_differentiable(composite, geo_prob=geo_prob, allow_far_view=_allow_far, allow_med_view=_allow_med)
             else:
                 composite_aug = composite
 
@@ -1480,9 +1911,10 @@ def main() -> None:
                 )
 
             # (e) Forward loss
+            _iou_bbox = host_bboxes[idx] if (args.iou_loss and idx < len(host_bboxes)) else None
             sample_loss = forward_person_loss(
                 torch_model, composite_aug, args.topk, device,
-                bbox=None, anchor_centers=None, iou_sigma=args.iou_sigma
+                bbox=_iou_bbox, anchor_centers=anchor_centers_t, iou_sigma=args.iou_sigma
             )
             obj_losses.append(sample_loss)
 
@@ -1519,56 +1951,212 @@ def main() -> None:
                 #   L_out: saliency-weighted mean of non-patch pixels (want LOW → push toward 0)
                 #   Negated because PGD does gradient descent
                 eps_mask = 1e-8
-                L_in  = (sal_weight * mask_aug * composite_aug).sum() \
-                        / mask_aug.sum().clamp(min=eps_mask)
-                L_out = (sal_weight * (1.0 - mask_aug) * composite_aug).sum() \
-                        / (1.0 - mask_aug).sum().clamp(min=eps_mask)
+                sal_in  = sal_weight * mask_aug
+                sal_out = sal_weight * (1.0 - mask_aug)
+                L_in  = (sal_in  * composite_aug).sum() / (sal_in.sum()  + eps_mask)
+                L_out = (sal_out * composite_aug).sum() / (sal_out.sum() + eps_mask)
                 attn_loss = -(L_in - args.lambda_attn * L_out)
                 attn_losses.append(attn_loss)
 
         if not obj_losses:
             continue  # no valid samples this step (all hosts lacked confident keypoints)
 
-        # (f) Mean loss + regularisation
-        loss = sum(obj_losses) / len(obj_losses)
+        # (f) Mean loss + worst-case term + regularisation
+        #     The worst-case (max) term forces gradients toward the hardest
+        #     image in the batch, preventing the patch from specialising on
+        #     easy samples while ignoring resistant ones.
+        loss = sum(obj_losses) / len(obj_losses) + 0.5 * max(obj_losses)
         if attn_losses:
             loss = loss + sum(attn_losses) / len(attn_losses)
         if args.alpha > 0 and printable_colors is not None:
             loss = loss + args.alpha * nps_loss(patch, printable_colors)
+            if patch_torso is not None:
+                loss = loss + args.alpha * nps_loss(patch_torso, printable_colors)
         if args.beta > 0:
             loss = loss + args.beta * tv_loss(patch)
+            if patch_torso is not None:
+                loss = loss + args.beta * tv_loss(patch_torso)
 
-        # (g) Backward + PGD step
+        # (g) Backward + PGD step (both patches updated jointly)
         loss.backward()
         with torch.no_grad():
             patch.data -= lr_curr * patch.grad.sign()
             patch.data.clamp_(0.0, 1.0)
         patch.grad = None
+        if patch_torso is not None and patch_torso.grad is not None:
+            with torch.no_grad():
+                patch_torso.data -= lr_curr * patch_torso.grad.sign()
+                patch_torso.data.clamp_(0.0, 1.0)
+            patch_torso.grad = None
 
         if loss.item() < best_loss:
-            best_loss  = loss.item()
-            best_patch = patch.detach().clone()
+            best_loss = loss.item()
+        # Track best batch obj_loss — used as fallback checkpoint selection
+        # until the first CONF eval runs, then CONF eval takes over.
+        _obj_loss_val = (sum(obj_losses) / len(obj_losses)).item()
+        if _obj_loss_val < best_obj_loss:
+            best_obj_loss = _obj_loss_val
+            if best_mean_conf == float("inf"):
+                # No CONF eval yet — use batch loss as fallback
+                best_patch = patch.detach().clone()
+
+        # Step-1 gradient sanity check: if the patch has no variation after the
+        # first update, gradients are not flowing — abort early rather than waste time.
+        if step == start_step + 1:
+            with torch.no_grad():
+                _std = patch.std().item()
+                _mn  = patch.min().item()
+                _mx  = patch.max().item()
+            _log(f"[SANITY] Step 1 torso patch stats: std={_std:.4f}  range=[{_mn:.3f}, {_mx:.3f}]")
+            if _std < 1e-4:
+                _log("[ERROR] Torso patch has zero variation after step 1 — gradients are NOT flowing.")
+                _log("[ERROR] Aborting. Check composite_torso_patch() for in-place ops.")
+                raise RuntimeError("Gradient flow check failed: torso patch std < 1e-4 after step 1")
+            else:
+                _log("[SANITY] Torso patch gradient flow OK.")
+            if patch_torso is not None:
+                with torch.no_grad():
+                    _ts = patch_torso.std().item()
+                    _tmn = patch_torso.min().item()
+                    _tmx = patch_torso.max().item()
+                _log(f"[SANITY] Step 1 torso patch stats: std={_ts:.4f}  range=[{_tmn:.3f}, {_tmx:.3f}]  torso_updates={_torso_updates}")
+                if _ts < 1e-4 and _torso_updates > 0:
+                    _log("[ERROR] Torso patch not updating despite valid composites — check composite_torso_patch() for in-place ops.")
+                elif _torso_updates == 0:
+                    _log("[WARN]  Torso patch got 0 updates on step 1 — no images had both shoulders visible (kpts 5,6,11 conf>=0.3).")
+                else:
+                    _log("[SANITY] Torso patch gradient flow OK.")
 
         # Periodic checkpoint
         if step % args.checkpoint_every == 0:
-            torch.save({
+            _ckpt_data = {
                 "step":       step,
                 "patch":      patch.detach().cpu(),
                 "best_patch": best_patch.cpu(),
                 "best_loss":  best_loss,
-            }, ckpt_path)
+                "best_mean_conf": best_mean_conf,
+            }
+            if patch_torso is not None:
+                _ckpt_data["patch_torso"]      = patch_torso.detach().cpu()
+                _ckpt_data["best_patch_torso"] = best_patch_torso.cpu() if best_patch_torso is not None else patch_torso.detach().cpu()
+            torch.save(_ckpt_data, ckpt_path)
 
         if args.verbose and step % 10 == 0:
             attn_str = f"  attn={sum(l.item() for l in attn_losses)/len(attn_losses):.4f}" if attn_losses else ""
-            print(f"  Step {step:>5d}/{args.steps}  loss={loss.item():.6f}  best={best_loss:.6f}  lr={lr_curr:.5f}  geo={geo_prob:.2f}{attn_str}")
+            with torch.no_grad():
+                _p_std = patch.std().item()
+                _p_mn  = patch.min().item()
+                _p_mx  = patch.max().item()
+            patch_str = f"  patch_std={_p_std:.4f} [{_p_mn:.3f},{_p_mx:.3f}]"
+            torso_str = f"  torso_upd={_torso_updates}/{args.batch_size}" if args.dual_patch else ""
+            _log(f"  Step {step:>5d}/{args.steps}  loss={loss.item():.6f}  best_obj={best_obj_loss:.6f}  lr={lr_curr:.5f}  geo={geo_prob:.2f}{attn_str}{patch_str}{torso_str}")
+
+        # Periodic mean-confidence check — same metric as baseline
+        _conf_interval = getattr(args, "conf_interval", 200)
+        if step > start_step and step % _conf_interval == 0:
+            # Move model to CPU for yolo.predict() calls, restore after
+            torch_model.eval().to("cpu")
+            yolo.overrides["device"] = "cpu"
+            _conf_check = []
+            _bp_cpu = best_patch.detach().cpu()
+            _bp_torso_cpu = best_patch_torso.detach().cpu() if (args.dual_patch and best_patch_torso is not None) else None
+            for _ci, _h_bgr in enumerate(host_pool_bgr):
+                _ckpts = pose_keypoints[_ci] if _ci < len(pose_keypoints) else []
+                if len(_ckpts) > 0:
+                    _pk = _ckpts[0]
+                    _comp_c_ready = False
+                    _host_ci = host_pool_t[_ci].cpu()
+                    # Torso mode: composite on shoulder→hip region
+                    _conf_ls_c = _pk[5][2]; _conf_rs_c = _pk[6][2]; _conf_lh_c = _pk[11][2]
+                    if _conf_ls_c >= 0.3 and _conf_rs_c >= 0.3 and _conf_lh_c >= 0.3:
+                        with torch.no_grad():
+                            _comp_c, _ = composite_torso_patch(
+                                _host_ci, _bp_cpu, _pk, IMG_SIZE, IMG_SIZE
+                            )
+                        _comp_c_ready = True
+                    if _comp_c_ready:
+                        _img_c = cv2.cvtColor(
+                            (_comp_c.squeeze(0).permute(1, 2, 0).numpy() * 255).astype(np.uint8),
+                            cv2.COLOR_RGB2BGR
+                        )
+                        _res_c = yolo.predict(source=_img_c, conf=0.01, classes=[PERSON_CLASS], verbose=False)
+                        _boxes_c = _res_c[0].boxes
+                        _conf_check.append(float(_boxes_c.conf.cpu().max()) if (_boxes_c is not None and len(_boxes_c) > 0) else 0.0)
+                    else:
+                        # Can't apply patch (no valid keypoints) — use clean image
+                        _res_c = yolo.predict(source=_h_bgr, conf=0.01, classes=[PERSON_CLASS], verbose=False)
+                        _boxes_c = _res_c[0].boxes
+                        if _boxes_c is not None and len(_boxes_c) > 0:
+                            _conf_check.append(float(_boxes_c.conf.cpu().max()))
+                else:
+                    _res_c = yolo.predict(source=_h_bgr, conf=0.01, classes=[PERSON_CLASS], verbose=False)
+                    _boxes_c = _res_c[0].boxes
+                    if _boxes_c is not None and len(_boxes_c) > 0:
+                        _conf_check.append(float(_boxes_c.conf.cpu().max()))
+            torch_model.eval().to(device)  # restore to training device
+            yolo.overrides["device"] = str(device)
+            if _conf_check:
+                _mean_c = float(np.mean(_conf_check))
+                _suppressed_c = sum(1 for c in _conf_check if c < 0.25)
+                _pct = 100.0 * (_mean_c - clean_baseline) / (clean_baseline + 1e-9)
+                _log(f"[CONF]  Step {step:>5d}  mean_conf={_mean_c:.4f}  (baseline={clean_baseline:.4f}, Δ={_pct:+.1f}%)  suppressed(<0.25)={_suppressed_c}/{len(_conf_check)}")
+                # Select best patch by cross-dataset eval rather than batch loss —
+                # prevents specialisation on easy samples that skew best_obj.
+                if _mean_c < best_mean_conf:
+                    best_mean_conf = _mean_c
+                    best_patch = patch.detach().clone()
+                    if patch_torso is not None:
+                        best_patch_torso = patch_torso.detach().clone()
+                    _log(f"[CONF]  ↑ New best patch (mean_conf={_mean_c:.4f}, suppressed={_suppressed_c}/{len(_conf_check)})")
 
     # ------------------------------------------------------------------
     # 6b. Post-training summary
     # ------------------------------------------------------------------
     print(f"[INFO] Training complete. Best loss: {best_loss:.6f}")
-    clean_final = 0.0
-    reduction = 0.0
+    print("[INFO] Computing post-training confidence (best patch, all hosts) …")
+    # Force Ultralytics to use CPU for predict() — manual .to("cpu") alone is
+    # not enough because yolo.predict() internally re-routes to the original device.
+    torch_model.eval().to("cpu")
+    yolo.overrides["device"] = "cpu"
+    final_confs = []
+    _bp_cpu_final = best_patch.detach().cpu()
+    _bp_torso_cpu_final = best_patch_torso.detach().cpu() if (args.dual_patch and best_patch_torso is not None) else None
+    for _idx, _h_bgr in enumerate(host_pool_bgr):
+        _kpts_list = pose_keypoints[_idx] if _idx < len(pose_keypoints) else []
+        _comp_ready = False
+        if len(_kpts_list) > 0:
+            _pkpts = _kpts_list[0]
+            _host_cpu = host_pool_t[_idx].cpu()
+            with torch.no_grad():
+                # Torso mode: composite on shoulder→hip region
+                if _pkpts[5][2] >= 0.3 and _pkpts[6][2] >= 0.3 and _pkpts[11][2] >= 0.3:
+                    _comp_t, _ = composite_torso_patch(
+                        _host_cpu, _bp_cpu_final, _pkpts, IMG_SIZE, IMG_SIZE
+                    )
+                    _comp_ready = True
+        if _comp_ready:
+            _img_np = cv2.cvtColor(
+                (_comp_t.squeeze(0).permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8),
+                cv2.COLOR_RGB2BGR
+            )
+        else:
+            _img_np = _h_bgr
+        try:
+            with torch.no_grad():
+                _res = yolo.predict(source=_img_np, conf=0.01, classes=[PERSON_CLASS], verbose=False)
+            _boxes = _res[0].boxes
+            if _boxes is not None and len(_boxes) > 0:
+                final_confs.append(float(_boxes.conf.cpu().max()))
+            else:
+                final_confs.append(0.0)
+        except Exception as _eval_err:
+            print(f"[WARN] Post-eval predict failed for host {_idx}: {_eval_err}")
+            final_confs.append(0.0)
+    clean_final = float(np.mean(final_confs)) if final_confs else 0.0
+    reduction = (1.0 - clean_final / clean_baseline) * 100.0 if clean_baseline > 0 else 0.0
     print(f"[INFO] Confidence reduction : {clean_baseline:.6f} → {clean_final:.6f}  ({reduction:.1f}% suppression)")
+    torch_model.eval().to(device)  # restore after predict() calls
+    yolo.overrides["device"] = str(device)
 
     # ------------------------------------------------------------------
     # 7. Save patch + preview
@@ -1695,6 +2283,17 @@ def main() -> None:
     cv2.imwrite(str(preview),
                 cv2.resize(patch_bgr, (512, 512), interpolation=cv2.INTER_NEAREST))
     print(f"[INFO] Latest copy → {out_path}")
+
+    # Save torso patch (dual-patch mode)
+    if args.dual_patch and best_patch_torso is not None:
+        _torso_out = Path(args.torso_out) if args.torso_out else out_path.parent / (out_path.stem + "_torso.png")
+        _torso_np  = best_patch_torso.squeeze(0).permute(1, 2, 0).cpu().numpy()
+        _torso_bgr = cv2.cvtColor((_torso_np * 255).astype(np.uint8), cv2.COLOR_RGB2BGR)
+        cv2.imwrite(str(_torso_out), _torso_bgr)
+        cv2.imwrite(str(_torso_out.parent / (_torso_out.stem + "_preview.png")),
+                    cv2.resize(_torso_bgr, (512, 512), interpolation=cv2.INTER_NEAREST))
+        cv2.imwrite(str(iter_dir / _torso_out.name), _torso_bgr)
+        print(f"[INFO] Torso patch → {_torso_out}")
 
     if best_hat_patch is not None:
         hat_np      = best_hat_patch.squeeze(0).permute(1, 2, 0).cpu().numpy()

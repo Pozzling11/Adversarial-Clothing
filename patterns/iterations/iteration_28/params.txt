@@ -1,0 +1,5 @@
+iteration      : 28
+date           : 2026-03-28T00:15:10
+note           : recovered from checkpoint (post-training eval crashed)
+step           : 15000
+best_loss      : 0.003548

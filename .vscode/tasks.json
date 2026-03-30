@@ -2,6 +2,61 @@
 	"version": "2.0.0",
 	"tasks": [
 		{
+			"label": "Watch training log (torso_15k)",
+			"type": "shell",
+			"command": "tail",
+			"args": ["-f", "/tmp/torso_15k.log"],
+			"isBackground": true,
+			"presentation": {
+				"reveal": "always",
+				"panel": "dedicated",
+				"clear": true,
+				"title": "Training Progress"
+			},
+			"problemMatcher": []
+		},
+		{
+			"label": "Train torso repro (data/clean, no attn)",
+			"type": "shell",
+			"command": "./.venv/bin/python",
+			"args": [
+				"-u",
+				"scripts/generate_patch.py",
+				"--patch-size", "160",
+				"--steps", "12000",
+				"--lr", "0.03",
+				"--lr-min", "0.003",
+				"--init", "uniform",
+				"--alpha", "0.01",
+				"--beta", "2.5",
+				"--batch-size", "8",
+				"--bbox-placement",
+				"--patch-fraction", "1.0",
+				"--torso-width",
+				"--hard-mining",
+				"--hard-temp", "0.5",
+				"--geo-warmup", "0.20",
+				"--geo-ramp", "0.25",
+				"--checkpoint-every", "100",
+				"--hosts-dir", "data/clean",
+				"--out", "patterns/patch_torso_repro.png",
+				"--log-file", "training.log",
+				"--verbose"
+			],
+			"options": {
+				"env": {
+					"PYTORCH_ENABLE_MPS_FALLBACK": "1"
+				}
+			},
+			"isBackground": false,
+			"group": "build",
+			"presentation": {
+				"reveal": "always",
+				"panel": "dedicated",
+				"clear": true
+			}
+		},
+		{
 			"label": "Run YOLOv8 Live Detection",
 			"type": "shell",
 			"command": "./.venv/bin/python",
@@ -828,9 +883,22 @@
 			"group": "build"
 		},
 		{
+			"label": "Train torso quilt",
+			"type": "shell",
+			"command": "PYTORCH_ENABLE_MPS_FALLBACK=1 ./.venv/bin/python -u scripts/generate_patch.py --patch-size 160 --steps 15000 --lr 0.02 --lr-min 0.002 --init uniform --alpha 0.01 --beta 2.5 --batch-size 8 --bbox-placement --patch-fraction 1.0 --torso-width --iou-loss --iou-sigma 0.5 --hard-mining --hard-temp 0.5 --geo-warmup 0.15 --geo-ramp 0.20 --checkpoint-every 100 --hosts-dir data/clean --out patterns/patch_160_torso_quilt.png --resume --log-file training_quilt.log --verbose 2>&1 | tee -a training_quilt.log",
+			"args": [],
+			"isBackground": false,
+			"group": "build"
+		},
+		{
 			"label": "Train patch (no shape args)",
 			"type": "shell",
 			"command": "./.venv/bin/python",
+			"options": {
+				"env": {
+					"PYTORCH_ENABLE_MPS_FALLBACK": "1"
+				}
+			},
 			"args": [
 				"-u",
 				"scripts/generate_patch.py",
@@ -868,6 +936,7 @@
 				"100",
 				"--out",
 				"patterns/patch_160_learned_shape.png",
+				"--resume",
 				"--verbose"
 			],
 			"isBackground": false,

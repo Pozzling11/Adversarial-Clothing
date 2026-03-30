@@ -1,0 +1,43 @@
+iteration      : 25
+date           : 2026-03-24T17:31:23
+patch_size     : 160
+steps          : 15000
+lr             : 0.02 → 0.002 (cosine decay)
+eps            : 1.0
+init           : uniform
+batch_size     : 8
+topk           : 50
+alpha_nps      : 0.01
+beta_tv        : 2.5
+eot            : True
+eot_geo_warmup : 15% of steps (photometric only)
+eot_geo_ramp   : 20% of steps (geo_prob 0→1)
+eot_rot_range  : ±20.0°
+eot_scale      : 0.5–1.2×
+eot_persp      : ±25% corner jitter
+eot_jpeg_q     : 55–95
+eot_brightness : ±30%
+eot_gamma      : 0.6–1.8
+eot_hsv_hue    : ±12°
+eot_hsv_sat    : ±25%
+eot_shadow     : p=0.4
+eot_color_jit  : ±20% per-channel
+eot_print_noise: 0–8 std Gaussian
+device         : mps
+clean_baseline : 0.000000
+clean_final    : 0.000000
+final_loss     : 0.000732
+loss_reduction : 0.0%
+host_pool_size : 43
+loss_mode      : mean (confidence suppression)
+bbox_placement : True
+patch_fraction : 1.0
+torso_width    : True
+hat_patch      : False
+iou_loss       : True
+iou_sigma      : 0.5
+hard_mining    : True
+hard_temp      : 0.5
+style_target   : none
+letter         : none
+letter_weight  : 0.2

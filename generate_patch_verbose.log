@@ -1,0 +1,172 @@
+[DEBUG] Loading host images from: /Volumes/Crucial X6/VS Code Adversarial Patterns/data/TRAINING LEG IMAGES _preprocessed
+[INFO] Host pool  : 43 image(s) from /Volumes/Crucial X6/VS Code Adversarial Patterns/data/TRAINING LEG IMAGES _preprocessed
+[DEBUG] Loaded 43 host images.
+[DEBUG] Host image 0: shape=(960, 720, 3), dtype=uint8
+[DEBUG] Host image 1: shape=(960, 720, 3), dtype=uint8
+[DEBUG] Host image 2: shape=(960, 720, 3), dtype=uint8
+[DEBUG] Host image 3: shape=(960, 720, 3), dtype=uint8
+[DEBUG] Host image 4: shape=(960, 720, 3), dtype=uint8
+[DEBUG] Host image 5: shape=(960, 720, 3), dtype=uint8
+[DEBUG] Host image 6: shape=(960, 643, 3), dtype=uint8
+[DEBUG] Host image 7: shape=(960, 643, 3), dtype=uint8
+[DEBUG] Host image 8: shape=(960, 643, 3), dtype=uint8
+[DEBUG] Host image 9: shape=(960, 643, 3), dtype=uint8
+[DEBUG] Host image 10: shape=(960, 720, 3), dtype=uint8
+[DEBUG] Host image 11: shape=(960, 720, 3), dtype=uint8
+[DEBUG] Host image 12: shape=(960, 720, 3), dtype=uint8
+[DEBUG] Host image 13: shape=(960, 720, 3), dtype=uint8
+[DEBUG] Host image 14: shape=(960, 720, 3), dtype=uint8
+[DEBUG] Host image 15: shape=(960, 720, 3), dtype=uint8
+[DEBUG] Host image 16: shape=(960, 720, 3), dtype=uint8
+[DEBUG] Host image 17: shape=(960, 720, 3), dtype=uint8
+[DEBUG] Host image 18: shape=(960, 720, 3), dtype=uint8
+[DEBUG] Host image 19: shape=(960, 720, 3), dtype=uint8
+[DEBUG] Host image 20: shape=(960, 475, 3), dtype=uint8
+[DEBUG] Host image 21: shape=(960, 720, 3), dtype=uint8
+[DEBUG] Host image 22: shape=(960, 442, 3), dtype=uint8
+[DEBUG] Host image 23: shape=(960, 720, 3), dtype=uint8
+[DEBUG] Host image 24: shape=(960, 720, 3), dtype=uint8
+[DEBUG] Host image 25: shape=(960, 720, 3), dtype=uint8
+[DEBUG] Host image 26: shape=(960, 720, 3), dtype=uint8
+[DEBUG] Host image 27: shape=(960, 720, 3), dtype=uint8
+[DEBUG] Host image 28: shape=(960, 720, 3), dtype=uint8
+[DEBUG] Host image 29: shape=(960, 720, 3), dtype=uint8
+[DEBUG] Host image 30: shape=(960, 720, 3), dtype=uint8
+[DEBUG] Host image 31: shape=(259, 194, 3), dtype=uint8
+[DEBUG] Host image 32: shape=(259, 194, 3), dtype=uint8
+[DEBUG] Host image 33: shape=(298, 169, 3), dtype=uint8
+[DEBUG] Host image 34: shape=(275, 183, 3), dtype=uint8
+[DEBUG] Host image 35: shape=(612, 408, 3), dtype=uint8
+[DEBUG] Host image 36: shape=(612, 408, 3), dtype=uint8
+[DEBUG] Host image 37: shape=(960, 720, 3), dtype=uint8
+[DEBUG] Host image 38: shape=(960, 720, 3), dtype=uint8
+[DEBUG] Host image 39: shape=(960, 720, 3), dtype=uint8
+[DEBUG] Host image 40: shape=(960, 720, 3), dtype=uint8
+[DEBUG] Host image 41: shape=(960, 720, 3), dtype=uint8
+[DEBUG] Host image 42: shape=(612, 408, 3), dtype=uint8
+[DEBUG] Preprocessed host 0: tensor shape=torch.Size([1, 3, 960, 720]), dtype=torch.float32
+[DEBUG] Preprocessed host 1: tensor shape=torch.Size([1, 3, 960, 720]), dtype=torch.float32
+[DEBUG] Preprocessed host 2: tensor shape=torch.Size([1, 3, 960, 720]), dtype=torch.float32
+[DEBUG] Preprocessed host 3: tensor shape=torch.Size([1, 3, 960, 720]), dtype=torch.float32
+[DEBUG] Preprocessed host 4: tensor shape=torch.Size([1, 3, 960, 720]), dtype=torch.float32
+[DEBUG] Preprocessed host 5: tensor shape=torch.Size([1, 3, 960, 720]), dtype=torch.float32
+[DEBUG] Preprocessed host 6: tensor shape=torch.Size([1, 3, 960, 643]), dtype=torch.float32
+[DEBUG] Preprocessed host 7: tensor shape=torch.Size([1, 3, 960, 643]), dtype=torch.float32
+[DEBUG] Preprocessed host 8: tensor shape=torch.Size([1, 3, 960, 643]), dtype=torch.float32
+[DEBUG] Preprocessed host 9: tensor shape=torch.Size([1, 3, 960, 643]), dtype=torch.float32
+[DEBUG] Preprocessed host 10: tensor shape=torch.Size([1, 3, 960, 720]), dtype=torch.float32
+[DEBUG] Preprocessed host 11: tensor shape=torch.Size([1, 3, 960, 720]), dtype=torch.float32
+[DEBUG] Preprocessed host 12: tensor shape=torch.Size([1, 3, 960, 720]), dtype=torch.float32
+[DEBUG] Preprocessed host 13: tensor shape=torch.Size([1, 3, 960, 720]), dtype=torch.float32
+[DEBUG] Preprocessed host 14: tensor shape=torch.Size([1, 3, 960, 720]), dtype=torch.float32
+[DEBUG] Preprocessed host 15: tensor shape=torch.Size([1, 3, 960, 720]), dtype=torch.float32
+[DEBUG] Preprocessed host 16: tensor shape=torch.Size([1, 3, 960, 720]), dtype=torch.float32
+[DEBUG] Preprocessed host 17: tensor shape=torch.Size([1, 3, 960, 720]), dtype=torch.float32
+[DEBUG] Preprocessed host 18: tensor shape=torch.Size([1, 3, 960, 720]), dtype=torch.float32
+[DEBUG] Preprocessed host 19: tensor shape=torch.Size([1, 3, 960, 720]), dtype=torch.float32
+[DEBUG] Preprocessed host 20: tensor shape=torch.Size([1, 3, 960, 475]), dtype=torch.float32
+[DEBUG] Preprocessed host 21: tensor shape=torch.Size([1, 3, 960, 720]), dtype=torch.float32
+[DEBUG] Preprocessed host 22: tensor shape=torch.Size([1, 3, 960, 442]), dtype=torch.float32
+[DEBUG] Preprocessed host 23: tensor shape=torch.Size([1, 3, 960, 720]), dtype=torch.float32
+[DEBUG] Preprocessed host 24: tensor shape=torch.Size([1, 3, 960, 720]), dtype=torch.float32
+[DEBUG] Preprocessed host 25: tensor shape=torch.Size([1, 3, 960, 720]), dtype=torch.float32
+[DEBUG] Preprocessed host 26: tensor shape=torch.Size([1, 3, 960, 720]), dtype=torch.float32
+[DEBUG] Preprocessed host 27: tensor shape=torch.Size([1, 3, 960, 720]), dtype=torch.float32
+[DEBUG] Preprocessed host 28: tensor shape=torch.Size([1, 3, 960, 720]), dtype=torch.float32
+[DEBUG] Preprocessed host 29: tensor shape=torch.Size([1, 3, 960, 720]), dtype=torch.float32
+[DEBUG] Preprocessed host 30: tensor shape=torch.Size([1, 3, 960, 720]), dtype=torch.float32
+[DEBUG] Preprocessed host 31: tensor shape=torch.Size([1, 3, 259, 194]), dtype=torch.float32
+[DEBUG] Preprocessed host 32: tensor shape=torch.Size([1, 3, 259, 194]), dtype=torch.float32
+[DEBUG] Preprocessed host 33: tensor shape=torch.Size([1, 3, 298, 169]), dtype=torch.float32
+[DEBUG] Preprocessed host 34: tensor shape=torch.Size([1, 3, 275, 183]), dtype=torch.float32
+[DEBUG] Preprocessed host 35: tensor shape=torch.Size([1, 3, 612, 408]), dtype=torch.float32
+[DEBUG] Preprocessed host 36: tensor shape=torch.Size([1, 3, 612, 408]), dtype=torch.float32
+[DEBUG] Preprocessed host 37: tensor shape=torch.Size([1, 3, 960, 720]), dtype=torch.float32
+[DEBUG] Preprocessed host 38: tensor shape=torch.Size([1, 3, 960, 720]), dtype=torch.float32
+[DEBUG] Preprocessed host 39: tensor shape=torch.Size([1, 3, 960, 720]), dtype=torch.float32
+[DEBUG] Preprocessed host 40: tensor shape=torch.Size([1, 3, 960, 720]), dtype=torch.float32
+[DEBUG] Preprocessed host 41: tensor shape=torch.Size([1, 3, 960, 720]), dtype=torch.float32
+[DEBUG] Preprocessed host 42: tensor shape=torch.Size([1, 3, 612, 408]), dtype=torch.float32
+[DEBUG] Running YOLO inference on first host image...
+
+0: 640x480 1 person, 40.2ms
+Speed: 1.4ms preprocess, 40.2ms inference, 0.7ms postprocess per image at shape (1, 3, 640, 480)
+[DEBUG] YOLO inference results: [ultralytics.engine.results.Results object with attributes:
+
+boxes: ultralytics.engine.results.Boxes object
+keypoints: None
+masks: None
+names: {0: 'person', 1: 'bicycle', 2: 'car', 3: 'motorcycle', 4: 'airplane', 5: 'bus', 6: 'train', 7: 'truck', 8: 'boat', 9: 'traffic light', 10: 'fire hydrant', 11: 'stop sign', 12: 'parking meter', 13: 'bench', 14: 'bird', 15: 'cat', 16: 'dog', 17: 'horse', 18: 'sheep', 19: 'cow', 20: 'elephant', 21: 'bear', 22: 'zebra', 23: 'giraffe', 24: 'backpack', 25: 'umbrella', 26: 'handbag', 27: 'tie', 28: 'suitcase', 29: 'frisbee', 30: 'skis', 31: 'snowboard', 32: 'sports ball', 33: 'kite', 34: 'baseball bat', 35: 'baseball glove', 36: 'skateboard', 37: 'surfboard', 38: 'tennis racket', 39: 'bottle', 40: 'wine glass', 41: 'cup', 42: 'fork', 43: 'knife', 44: 'spoon', 45: 'bowl', 46: 'banana', 47: 'apple', 48: 'sandwich', 49: 'orange', 50: 'broccoli', 51: 'carrot', 52: 'hot dog', 53: 'pizza', 54: 'donut', 55: 'cake', 56: 'chair', 57: 'couch', 58: 'potted plant', 59: 'bed', 60: 'dining table', 61: 'toilet', 62: 'tv', 63: 'laptop', 64: 'mouse', 65: 'remote', 66: 'keyboard', 67: 'cell phone', 68: 'microwave', 69: 'oven', 70: 'toaster', 71: 'sink', 72: 'refrigerator', 73: 'book', 74: 'clock', 75: 'vase', 76: 'scissors', 77: 'teddy bear', 78: 'hair drier', 79: 'toothbrush'}
+obb: None
+orig_img: array([[[ 33,  37,  38],
+        [ 33,  37,  38],
+        [ 31,  35,  36],
+        ...,
+        [185, 199, 205],
+        [181, 195, 201],
+        [186, 200, 206]],
+
+       [[ 33,  37,  38],
+        [ 32,  36,  37],
+        [ 32,  36,  37],
+        ...,
+        [183, 197, 203],
+        [184, 198, 204],
+        [184, 198, 204]],
+
+       [[ 35,  39,  40],
+        [ 31,  35,  36],
+        [ 30,  34,  35],
+        ...,
+        [182, 196, 202],
+        [183, 197, 203],
+        [180, 194, 200]],
+
+       ...,
+
+       [[140, 149, 153],
+        [128, 137, 141],
+        [140, 149, 153],
+        ...,
+        [173, 187, 193],
+        [167, 181, 187],
+        [173, 187, 193]],
+
+       [[129, 138, 142],
+        [138, 147, 151],
+        [133, 142, 146],
+        ...,
+        [173, 187, 193],
+        [173, 187, 193],
+        [170, 184, 190]],
+
+       [[142, 151, 155],
+        [126, 135, 139],
+        [138, 147, 151],
+        ...,
+        [170, 184, 190],
+        [172, 186, 192],
+        [177, 191, 197]]], shape=(960, 720, 3), dtype=uint8)
+orig_shape: (960, 720)
+path: 'image0.jpg'
+probs: None
+save_dir: '/Volumes/Crucial X6/VS Code Adversarial Patterns/runs/detect/predict'
+speed: {'preprocess': 1.3890420086681843, 'inference': 40.19112499372568, 'postprocess': 0.6537500012200326}]
+[INFO] Device     : mps
+[INFO] Weights    : /Volumes/Crucial X6/VS Code Adversarial Patterns/yolov8n.pt
+[INFO] Patch size : 256×256
+[INFO] Steps      : 1500  |  LR: 0.02 → 0.003 (cosine)  |  ε: 1.0
+[INFO] EOT        : ON
+[INFO] Init noise : uniform
+[INFO] Loss mode  : mean (confidence suppression)
+[INFO] Batch size : 4 images/step
+[INFO] NPS α      : 0.01  |  TV β : 2.5
+[INFO] BBox placement: OFF (torso-band fallback)
+[INFO] EOT curriculum : geo warmup=25% of steps, ramp=40% of steps, then full geo
+[INFO] Printable colours: 30 loaded from /Volumes/Crucial X6/VS Code Adversarial Patterns/data/printable_colors.txt
+[INFO] Host pool  : 43 image(s) from /Volumes/Crucial X6/VS Code Adversarial Patterns/data/TRAINING LEG IMAGES _preprocessed
+[INFO] Computing clean baseline confidence (43 hosts, no patch) …
+[INFO] Clean baseline mean confidence : 0.000000  (0/43 subjects detected)
+[INFO] Computing post-patch confidence (43 hosts, best patch applied) …
+[INFO] Post-patch mean confidence     : 0.000000
+[INFO] Confidence reduction : 0.000000 → 0.000000  (100.0% suppression)

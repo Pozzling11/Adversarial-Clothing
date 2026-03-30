@@ -1,0 +1,225 @@
+[INFO] Device     : mps
+[INFO] Weights    : /Volumes/Crucial X6/VS Code Adversarial Patterns/yolov8n.pt
+[INFO] Patch size : 160×160
+[INFO] Steps      : 15000  |  LR: 0.03 → 0.003 (cosine)  |  ε: 1.0
+[INFO] EOT        : ON
+[INFO] Init noise : uniform
+[INFO] Loss mode  : mean (confidence suppression)
+[INFO] Batch size : 4 images/step
+[INFO] NPS α      : 0.01  |  TV β : 2.5
+[INFO] BBox placement: ON  (patch fraction=0.35)
+[INFO] EOT curriculum : geo warmup=25% of steps, ramp=40% of steps, then full geo
+[INFO] IoU-guided loss  : ON  (sigma=0.5)
+[INFO] Hard-example mine: ON  (temp=0.5, EMA α=0.1)
+[INFO] Printable colours: 30 loaded from /Volumes/Crucial X6/VS Code Adversarial Patterns/data/printable_colors.txt
+[INFO] Host pool  : 44 image(s) from /Volumes/Crucial X6/VS Code Adversarial Patterns/data/TRAINING LEG IMAGES
+[INFO] Pre-detecting person bboxes in host pool …
+[INFO]   44/44 host images have detectable persons
+[INFO] IoU anchor grid  : 8400 centres precomputed
+[INFO] Computing clean baseline confidence (44 hosts, no patch) …
+[INFO] Clean baseline mean confidence : 0.885851  (44/44 subjects detected)
+
+0: 640x480 1 person, 36.8ms
+Speed: 1.8ms preprocess, 36.8ms inference, 0.4ms postprocess per image at shape (1, 3, 640, 480)
+
+0: 640x480 1 person, 37.7ms
+Speed: 1.8ms preprocess, 37.7ms inference, 0.4ms postprocess per image at shape (1, 3, 640, 480)
+
+0: 640x480 1 person, 38.6ms
+Speed: 1.8ms preprocess, 38.6ms inference, 0.4ms postprocess per image at shape (1, 3, 640, 480)
+
+0: 640x480 1 person, 39.0ms
+Speed: 1.9ms preprocess, 39.0ms inference, 0.4ms postprocess per image at shape (1, 3, 640, 480)
+
+0: 640x480 1 person, 38.7ms
+Speed: 1.7ms preprocess, 38.7ms inference, 0.4ms postprocess per image at shape (1, 3, 640, 480)
+
+0: 640x480 1 person, 39.9ms
+Speed: 1.8ms preprocess, 39.9ms inference, 0.4ms postprocess per image at shape (1, 3, 640, 480)
+
+0: 640x448 1 person, 36.4ms
+Speed: 2.0ms preprocess, 36.4ms inference, 0.4ms postprocess per image at shape (1, 3, 640, 448)
+
+0: 640x448 1 person, 38.0ms
+Speed: 1.6ms preprocess, 38.0ms inference, 0.5ms postprocess per image at shape (1, 3, 640, 448)
+
+0: 640x448 1 person, 36.6ms
+Speed: 1.7ms preprocess, 36.6ms inference, 0.4ms postprocess per image at shape (1, 3, 640, 448)
+
+0: 640x448 1 person, 37.6ms
+Speed: 2.1ms preprocess, 37.6ms inference, 0.4ms postprocess per image at shape (1, 3, 640, 448)
+
+0: 640x480 2 persons, 38.8ms
+Speed: 1.9ms preprocess, 38.8ms inference, 0.4ms postprocess per image at shape (1, 3, 640, 480)
+
+0: 640x480 1 person, 39.3ms
+Speed: 1.9ms preprocess, 39.3ms inference, 0.4ms postprocess per image at shape (1, 3, 640, 480)
+
+0: 640x480 1 person, 39.4ms
+Speed: 1.6ms preprocess, 39.4ms inference, 0.4ms postprocess per image at shape (1, 3, 640, 480)
+
+0: 640x480 1 person, 39.3ms
+Speed: 1.7ms preprocess, 39.3ms inference, 0.4ms postprocess per image at shape (1, 3, 640, 480)
+
+0: 640x480 1 person, 40.2ms
+Speed: 1.7ms preprocess, 40.2ms inference, 0.4ms postprocess per image at shape (1, 3, 640, 480)
+
+0: 640x480 2 persons, 39.2ms
+Speed: 1.9ms preprocess, 39.2ms inference, 0.4ms postprocess per image at shape (1, 3, 640, 480)
+
+0: 640x480 1 person, 38.4ms
+Speed: 1.8ms preprocess, 38.4ms inference, 0.4ms postprocess per image at shape (1, 3, 640, 480)
+
+0: 640x480 1 person, 38.1ms
+Speed: 1.8ms preprocess, 38.1ms inference, 0.4ms postprocess per image at shape (1, 3, 640, 480)
+
+0: 640x480 1 person, 40.1ms
+Speed: 1.9ms preprocess, 40.1ms inference, 0.4ms postprocess per image at shape (1, 3, 640, 480)
+
+0: 640x480 1 person, 39.1ms
+Speed: 1.8ms preprocess, 39.1ms inference, 0.4ms postprocess per image at shape (1, 3, 640, 480)
+
+0: 640x320 1 person, 31.2ms
+Speed: 0.9ms preprocess, 31.2ms inference, 0.3ms postprocess per image at shape (1, 3, 640, 320)
+
+0: 640x480 1 person, 39.8ms
+Speed: 1.7ms preprocess, 39.8ms inference, 0.4ms postprocess per image at shape (1, 3, 640, 480)
+
+0: 640x320 1 person, 32.5ms
+Speed: 1.1ms preprocess, 32.5ms inference, 0.3ms postprocess per image at shape (1, 3, 640, 320)
+
+0: 640x480 1 person, 41.5ms
+Speed: 1.8ms preprocess, 41.5ms inference, 0.4ms postprocess per image at shape (1, 3, 640, 480)
+
+0: 640x480 1 person, 40.5ms
+Speed: 1.8ms preprocess, 40.5ms inference, 0.4ms postprocess per image at shape (1, 3, 640, 480)
+
+0: 640x480 2 persons, 40.7ms
+Speed: 2.2ms preprocess, 40.7ms inference, 0.4ms postprocess per image at shape (1, 3, 640, 480)
+
+0: 640x480 1 person, 42.1ms
+Speed: 1.6ms preprocess, 42.1ms inference, 0.4ms postprocess per image at shape (1, 3, 640, 480)
+
+0: 640x480 1 person, 41.0ms
+Speed: 1.7ms preprocess, 41.0ms inference, 0.4ms postprocess per image at shape (1, 3, 640, 480)
+
+0: 640x480 1 person, 41.5ms
+Speed: 1.7ms preprocess, 41.5ms inference, 0.4ms postprocess per image at shape (1, 3, 640, 480)
+
+0: 640x480 1 person, 40.7ms
+Speed: 1.7ms preprocess, 40.7ms inference, 0.4ms postprocess per image at shape (1, 3, 640, 480)
+
+0: 640x480 1 person, 40.7ms
+Speed: 1.7ms preprocess, 40.7ms inference, 0.4ms postprocess per image at shape (1, 3, 640, 480)
+
+0: 640x480 1 person, 40.3ms
+Speed: 1.1ms preprocess, 40.3ms inference, 0.4ms postprocess per image at shape (1, 3, 640, 480)
+
+0: 640x480 1 person, 40.5ms
+Speed: 1.0ms preprocess, 40.5ms inference, 0.4ms postprocess per image at shape (1, 3, 640, 480)
+
+0: 640x384 1 person, 34.1ms
+Speed: 0.9ms preprocess, 34.1ms inference, 0.3ms postprocess per image at shape (1, 3, 640, 384)
+
+0: 640x448 1 person, 37.6ms
+Speed: 1.2ms preprocess, 37.6ms inference, 0.4ms postprocess per image at shape (1, 3, 640, 448)
+
+0: 640x448 2 persons, 38.1ms
+Speed: 1.1ms preprocess, 38.1ms inference, 0.4ms postprocess per image at shape (1, 3, 640, 448)
+
+0: 640x448 1 person, 39.4ms
+Speed: 1.1ms preprocess, 39.4ms inference, 0.4ms postprocess per image at shape (1, 3, 640, 448)
+
+0: 640x448 1 person, 38.5ms
+Speed: 1.2ms preprocess, 38.5ms inference, 0.4ms postprocess per image at shape (1, 3, 640, 448)
+
+0: 640x480 1 person, 41.9ms
+Speed: 1.7ms preprocess, 41.9ms inference, 0.4ms postprocess per image at shape (1, 3, 640, 480)
+
+0: 640x480 2 persons, 40.4ms
+Speed: 1.9ms preprocess, 40.4ms inference, 0.4ms postprocess per image at shape (1, 3, 640, 480)
+
+0: 640x480 1 person, 40.3ms
+Speed: 1.8ms preprocess, 40.3ms inference, 0.4ms postprocess per image at shape (1, 3, 640, 480)
+
+0: 640x480 1 person, 40.0ms
+Speed: 1.8ms preprocess, 40.0ms inference, 0.4ms postprocess per image at shape (1, 3, 640, 480)
+
+0: 640x480 1 person, 40.7ms
+Speed: 1.8ms preprocess, 40.7ms inference, 0.4ms postprocess per image at shape (1, 3, 640, 480)
+
+0: 640x448 1 person, 38.9ms
+Speed: 1.1ms preprocess, 38.9ms inference, 0.4ms postprocess per image at shape (1, 3, 640, 448)
+[DEBUG] composite_aug shape before model: torch.Size([1, 3, 3088, 2316])
+[DEBUG] raw pred shape: (1, 84, 8400)
+[DEBUG] composite_aug shape before attention loss: torch.Size([1, 3, 640, 640])
+[DEBUG] composite_aug shape before model: torch.Size([1, 3, 259, 194])
+[DEBUG] composite_aug shape before attention loss: torch.Size([1, 3, 640, 640])
+[DEBUG] composite_aug shape before model: torch.Size([1, 3, 3088, 2316])
+[DEBUG] composite_aug shape before attention loss: torch.Size([1, 3, 640, 640])
+[DEBUG] composite_aug shape before model: torch.Size([1, 3, 4032, 3024])
+[DEBUG] composite_aug shape before attention loss: torch.Size([1, 3, 640, 640])
+[DEBUG] composite_aug shape before model: torch.Size([1, 3, 4032, 3024])
+[DEBUG] composite_aug shape before attention loss: torch.Size([1, 3, 640, 640])
+[DEBUG] composite_aug shape before model: torch.Size([1, 3, 259, 194])
+[DEBUG] composite_aug shape before attention loss: torch.Size([1, 3, 640, 640])
+[DEBUG] composite_aug shape before model: torch.Size([1, 3, 2556, 1179])
+[DEBUG] composite_aug shape before attention loss: torch.Size([1, 3, 640, 640])
+[DEBUG] composite_aug shape before model: torch.Size([1, 3, 612, 408])
+[DEBUG] composite_aug shape before attention loss: torch.Size([1, 3, 640, 640])
+[DEBUG] composite_aug shape before model: torch.Size([1, 3, 4032, 3024])
+[DEBUG] composite_aug shape before attention loss: torch.Size([1, 3, 640, 640])
+[DEBUG] composite_aug shape before model: torch.Size([1, 3, 4032, 3024])
+[DEBUG] composite_aug shape before attention loss: torch.Size([1, 3, 640, 640])
+[DEBUG] composite_aug shape before model: torch.Size([1, 3, 3088, 2316])
+[DEBUG] composite_aug shape before attention loss: torch.Size([1, 3, 640, 640])
+[DEBUG] composite_aug shape before model: torch.Size([1, 3, 4032, 3024])
+[DEBUG] composite_aug shape before attention loss: torch.Size([1, 3, 640, 640])
+[DEBUG] composite_aug shape before model: torch.Size([1, 3, 4032, 3024])
+[DEBUG] composite_aug shape before attention loss: torch.Size([1, 3, 640, 640])
+[DEBUG] composite_aug shape before model: torch.Size([1, 3, 4032, 3024])
+[DEBUG] composite_aug shape before attention loss: torch.Size([1, 3, 640, 640])
+[DEBUG] composite_aug shape before model: torch.Size([1, 3, 4032, 3024])
+[DEBUG] composite_aug shape before attention loss: torch.Size([1, 3, 640, 640])
+[DEBUG] composite_aug shape before model: torch.Size([1, 3, 3629, 2433])
+[DEBUG] composite_aug shape before attention loss: torch.Size([1, 3, 640, 640])
+[DEBUG] composite_aug shape before model: torch.Size([1, 3, 4032, 3024])
+[DEBUG] composite_aug shape before attention loss: torch.Size([1, 3, 640, 640])
+[DEBUG] composite_aug shape before model: torch.Size([1, 3, 3088, 2316])
+[DEBUG] composite_aug shape before attention loss: torch.Size([1, 3, 640, 640])
+[DEBUG] composite_aug shape before model: torch.Size([1, 3, 612, 411])
+[DEBUG] composite_aug shape before attention loss: torch.Size([1, 3, 640, 640])
+[DEBUG] composite_aug shape before model: torch.Size([1, 3, 5712, 4284])
+[DEBUG] composite_aug shape before attention loss: torch.Size([1, 3, 640, 640])
+[DEBUG] composite_aug shape before model: torch.Size([1, 3, 5712, 4284])
+[DEBUG] composite_aug shape before attention loss: torch.Size([1, 3, 640, 640])
+[DEBUG] composite_aug shape before model: torch.Size([1, 3, 4032, 3024])
+[DEBUG] composite_aug shape before attention loss: torch.Size([1, 3, 640, 640])
+[DEBUG] composite_aug shape before model: torch.Size([1, 3, 3088, 2316])
+[DEBUG] composite_aug shape before attention loss: torch.Size([1, 3, 640, 640])
+[DEBUG] composite_aug shape before model: torch.Size([1, 3, 3088, 2316])
+[DEBUG] composite_aug shape before attention loss: torch.Size([1, 3, 640, 640])
+[DEBUG] composite_aug shape before model: torch.Size([1, 3, 4032, 3024])
+[DEBUG] composite_aug shape before attention loss: torch.Size([1, 3, 640, 640])
+[DEBUG] composite_aug shape before model: torch.Size([1, 3, 3629, 2433])
+[DEBUG] composite_aug shape before attention loss: torch.Size([1, 3, 640, 640])
+[DEBUG] composite_aug shape before model: torch.Size([1, 3, 4032, 3024])
+[DEBUG] composite_aug shape before attention loss: torch.Size([1, 3, 640, 640])
+[DEBUG] composite_aug shape before model: torch.Size([1, 3, 4032, 3024])
+[DEBUG] composite_aug shape before attention loss: torch.Size([1, 3, 640, 640])
+[DEBUG] composite_aug shape before model: torch.Size([1, 3, 3088, 2316])
+[DEBUG] composite_aug shape before attention loss: torch.Size([1, 3, 640, 640])
+[DEBUG] composite_aug shape before model: torch.Size([1, 3, 3088, 2316])
+[DEBUG] composite_aug shape before attention loss: torch.Size([1, 3, 640, 640])
+[DEBUG] composite_aug shape before model: torch.Size([1, 3, 4032, 3024])
+[DEBUG] composite_aug shape before attention loss: torch.Size([1, 3, 640, 640])
+Traceback (most recent call last):
+  File "/Volumes/Crucial X6/VS Code Adversarial Patterns/scripts/generate_patch.py", line 2337, in <module>
+    main()
+    ~~~~^^
+  File "/Volumes/Crucial X6/VS Code Adversarial Patterns/scripts/generate_patch.py", line 1963, in main
+    composite = apply_patch_resized(host_t, patch, row, col, composite_size)
+  File "/Volumes/Crucial X6/VS Code Adversarial Patterns/scripts/generate_patch.py", line 274, in apply_patch_resized
+    out[:, :, row:row + composite_size, col:col + composite_size] = patch_scaled
+    ~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+RuntimeError: The expanded size of the tensor (77) must match the existing size (92) at non-singleton dimension 3.  Target sizes: [1, 3, 92, 77].  Tensor sizes: [3, 92, 92]

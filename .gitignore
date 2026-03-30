@@ -17,6 +17,9 @@ data/adversarial/*
 # Results CSVs (reproducible)
 results/*.csv
 
+# Startup cache (baseline detections + pose keypoints)
+.cache/
+
 # macOS
 .DS_Store
 ._*
